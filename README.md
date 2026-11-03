@@ -1,4 +1,4 @@
-# 256-point CUDA FFT
+# cuda-fft: 256-point CUDA FFT
 
 This project implements a forward, single-precision, 256-point complex FFT
 using an iterative radix-2 Cooley-Tukey decimation-in-time algorithm. The custom
