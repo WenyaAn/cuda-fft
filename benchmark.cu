@@ -1,4 +1,4 @@
-#include "fft256.cuh"
+#include "fft.cuh"
 
 #include <cufft.h>
 #include <cuda_runtime.h>

@@ -17,7 +17,7 @@ excludes host-device transfers and cuFFT plan creation.
 ```sh
 cmake -S . -B build
 cmake --build build -j
-./build/fft256_benchmark
+./build/fft_benchmark
 ```
 
 Run the same correctness checks and benchmark through CTest:

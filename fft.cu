@@ -1,4 +1,4 @@
-#include "fft256.cuh"
+#include "fft.cuh"
 
 namespace {
 
