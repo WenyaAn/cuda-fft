@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(cuda_fft_256 LANGUAGES CXX CUDA)
+project(cuda_fft LANGUAGES CXX CUDA)
 
 find_package(CUDAToolkit REQUIRED)
 
@@ -15,4 +15,4 @@ set_target_properties(fft256_benchmark PROPERTIES
 target_link_libraries(fft256_benchmark PRIVATE CUDA::cudart CUDA::cufft)
 
 enable_testing()
-add_test(NAME fft256_correctness_and_benchmark COMMAND fft256_benchmark)
+add_test(NAME fft_correctness_and_benchmark COMMAND fft256_benchmark)

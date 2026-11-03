@@ -1,17 +1,15 @@
-# cuda-fft: 256-point CUDA FFT
+# CUDA radix-2 FFT
 
-This project implements a forward, single-precision, 256-point complex FFT
-using an iterative radix-2 Cooley-Tukey decimation-in-time algorithm. The custom
-implementation uses CUDA runtime primitives only: one block of exactly 32
-threads loads bit-reversed input into shared memory, performs the eight FFT
-stages, and writes the result in natural order. It does not use cuFFT, cuBLAS,
-or other CUDA libraries.
+This project implements forward, single-precision, complex-to-complex radix-2
+FFTs for 256, 512, 1024, 2048, and 4096 points. The kernels use a 256-thread
+block, shared memory for cross-warp butterfly stages, and warp shuffles plus
+registers for the final stages. Twiddle factors are computed on the fly. The
+custom implementation does not use cuFFT or cuBLAS.
 
-The test executable compares the custom output with cuFFT C2C for impulse,
+The test executable compares each custom FFT against cuFFT C2C for impulse,
 shifted impulse, constant, single-tone, and deterministic random inputs. It
-then reports average custom-kernel and cuFFT execution times after warmup.
-Timing includes kernel/library execution but excludes host-device transfers and
-cuFFT plan creation.
+then reports custom-kernel and cuFFT execution times after warmup. Timing
+excludes host-device transfers and cuFFT plan creation.
 
 ## Build and run
 
