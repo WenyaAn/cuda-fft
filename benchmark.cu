@@ -21,6 +21,12 @@ constexpr int kBenchmarkSamples = 100;
 constexpr int kConfigBenchmarkIterations = 1000;
 constexpr int kConfigBenchmarkSamples = 30;
 
+/**
+ * @brief 检查 CUDA Runtime 调用结果，失败时输出错误并终止程序。
+ * @param status CUDA Runtime 返回的状态码。
+ * @param operation 出错的操作名称。
+ * @return 无；状态非成功时以失败状态退出进程。
+ */
 void check_cuda(cudaError_t status, const char* operation) {
     if (status != cudaSuccess) {
         std::fprintf(stderr, "%s failed: %s\n", operation,
@@ -29,6 +35,12 @@ void check_cuda(cudaError_t status, const char* operation) {
     }
 }
 
+/**
+ * @brief 检查 cuFFT 调用结果，失败时输出状态并终止程序。
+ * @param status cuFFT 返回的状态码。
+ * @param operation 出错的操作名称。
+ * @return 无；状态非成功时以失败状态退出进程。
+ */
 void check_cufft(cufftResult status, const char* operation) {
     if (status != CUFFT_SUCCESS) {
         std::fprintf(stderr, "%s failed with cuFFT status %d\n", operation,
@@ -37,6 +49,12 @@ void check_cufft(cufftResult status, const char* operation) {
     }
 }
 
+/**
+ * @brief 构造指定模式的单精度复数测试输入。
+ * @param test_name 输入模式名称，如 impulse、constant、single tone 或 random。
+ * @param fft_size 输入数组长度。
+ * @return 含有 fft_size 个复数值的主机端输入数组。
+ */
 std::vector<float2> make_input(const std::string& test_name, int fft_size) {
     std::vector<float2> input(fft_size, make_float2(0.0f, 0.0f));
     if (test_name == "impulse") {
@@ -61,6 +79,13 @@ std::vector<float2> make_input(const std::string& test_name, int fft_size) {
     return input;
 }
 
+/**
+ * @brief 比较两组复数结果，并检查逐元素绝对与相对误差容限。
+ * @param actual 待检查的输出结果。
+ * @param expected 参考结果。
+ * @param test_name 测试名称，用于错误报告。
+ * @return 所有元素中的最大复数绝对误差；超出容限时终止程序。
+ */
 float compare_outputs(const std::vector<float2>& actual,
                       const std::vector<float2>& expected,
                       const std::string& test_name) {
@@ -85,6 +110,16 @@ float compare_outputs(const std::vector<float2>& actual,
     return max_error;
 }
 
+/**
+ * @brief 重复执行 cuFFT C2C 变换并测量单次平均耗时。
+ * @param plan 已创建的 cuFFT 一维变换计划。
+ * @param device_input cuFFT 使用的设备端输入缓冲区。
+ * @param device_output cuFFT 写入的设备端输出缓冲区。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param direction CUFFT_FORWARD 或 CUFFT_INVERSE。
+ * @return 单次变换的平均耗时，单位为微秒；CUDA/cuFFT 失败时终止程序。
+ */
 float benchmark_cufft(cufftHandle plan,
                       cufftComplex* device_input,
                       cufftComplex* device_output,
@@ -112,6 +147,11 @@ struct TimingStats {
     float maximum;
 };
 
+/**
+ * @brief 汇总计时样本的均值、中位数、标准差和极值。
+ * @param samples 每个元素代表一次批量计时得到的单次平均耗时。
+ * @return 包含统计值的 TimingStats；samples 不应为空。
+ */
 TimingStats summarize_timings(const std::vector<float>& samples) {
     std::vector<float> sorted_samples = samples;
     std::sort(sorted_samples.begin(), sorted_samples.end());
@@ -140,6 +180,12 @@ TimingStats summarize_timings(const std::vector<float>& samples) {
             sorted_samples.back()};
 }
 
+/**
+ * @brief 将一组计时统计结果格式化输出到标准输出。
+ * @param label 计时对象名称。
+ * @param stats 计时统计结果。
+ * @return 无。
+ */
 void print_timing_stats(const char* label, const TimingStats& stats) {
     std::printf("  %-12s mean %7.3f us; median %7.3f us; stddev %6.3f us; "
                 "min/max %.3f/%.3f us\n",
@@ -147,8 +193,12 @@ void print_timing_stats(const char* label, const TimingStats& stats) {
                 stats.minimum, stats.maximum);
 }
 
-}  // namespace
+}
 
+/**
+ * @brief 对支持的 FFT 点数执行正确性校验、配置调优和性能比较。
+ * @return 所有测试成功时返回 EXIT_SUCCESS；CUDA/cuFFT 调用失败时退出程序。
+ */
 int main() {
     int device = 0;
     check_cuda(cudaSetDevice(device), "cudaSetDevice");

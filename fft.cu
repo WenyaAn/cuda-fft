@@ -2,6 +2,11 @@
 
 namespace {
 
+/**
+ * @brief 将 8 位无符号整数的位顺序反转。
+ * @param value 待反转的整数，低 8 位参与计算。
+ * @return 低 8 位反转后的整数。
+ */
 __device__ __forceinline__ unsigned int reverse_bits_8(unsigned int value) {
     value = ((value & 0x55u) << 1) | ((value >> 1) & 0x55u);
     value = ((value & 0x33u) << 2) | ((value >> 2) & 0x33u);
@@ -9,18 +14,31 @@ __device__ __forceinline__ unsigned int reverse_bits_8(unsigned int value) {
     return value;
 }
 
+/**
+ * @brief 根据变换方向生成一个复数旋转因子。
+ * @param index 旋转因子的频率索引。
+ * @param fft_size 当前 FFT 点数。
+ * @param inverse 是否生成反向变换使用的共轭方向旋转因子。
+ * @return 复数旋转因子 exp(±2πi·index/fft_size)。
+ */
 __device__ __forceinline__ float2 twiddle_factor(int index,
                                                 int fft_size = 256,
                                                 bool inverse = false) {
     constexpr float kTwoPi = 6.2831853071795864769f;
     float sine;
     float cosine;
+
     const float direction = inverse ? 1.0f : -1.0f;
     __sincosf(direction * kTwoPi * static_cast<float>(index) / fft_size, &sine,
               &cosine);
     return make_float2(cosine, sine);
 }
 
+/**
+ * @brief 计算二的幂点数对应的以 2 为底的对数。
+ * @param fft_size FFT 点数。
+ * @return fft_size 的 log2 整数值。
+ */
 __host__ __device__ constexpr int fft_log2(int fft_size) {
     int bits = 0;
     while (fft_size > 1) {
@@ -30,11 +48,26 @@ __host__ __device__ constexpr int fft_log2(int fft_size) {
     return bits;
 }
 
+/**
+ * @brief 执行两个复数的乘法，并使用融合乘加计算分量。
+ * @param lhs 左操作数。
+ * @param rhs 右操作数。
+ * @return lhs 与 rhs 的复数乘积。
+ */
 __device__ __forceinline__ float2 complex_multiply(float2 lhs, float2 rhs) {
     return make_float2(__fmaf_rn(-lhs.y, rhs.y, lhs.x * rhs.x),
                        __fmaf_rn(lhs.x, rhs.y, lhs.y * rhs.x));
 }
 
+/**
+ * @brief 以频率抽取算法执行指定长度的单精度复数 FFT。
+ * @tparam FftSize FFT 点数，必须是支持的二次幂长度。
+ * @tparam ThreadCount 当前线程块的线程数，必须整除 FftSize。
+ * @param input 指向设备端复数输入数组。
+ * @param output 指向设备端复数输出数组。
+ * @param inverse 是否执行反向变换；反向变换不做 1/N 归一化。
+ * @return 无；输出以自然频率顺序写入 output。
+ */
 template <int FftSize, int ThreadCount>
 __global__ void fft_radix2_decimation_in_frequency(const float2* input,
                                                    float2* output,
@@ -109,6 +142,19 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
     }
 }
 
+/**
+ * @brief 重复启动指定模板配置的 FFT，并用 CUDA events 计算平均耗时。
+ * @tparam FftSize FFT 点数。
+ * @tparam ThreadCount 当前线程块的线程数。
+ * @param input 指向设备端复数输入数组。
+ * @param output 指向设备端复数输出数组。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param iterations FFT kernel 的启动次数。
+ * @param average_us 用于接收单次平均执行时间，单位为微秒。
+ * @param inverse 是否执行反向变换。
+ * @return CUDA 状态码。
+ */
 template <int FftSize, int ThreadCount>
 cudaError_t benchmark_fft_iterations(const float2* input, float2* output,
                                      cudaEvent_t start, cudaEvent_t stop,
@@ -148,8 +194,15 @@ cudaError_t benchmark_fft_iterations(const float2* input, float2* output,
     return status;
 }
 
-}  // namespace
+}
 
+/**
+ * @brief 执行专门优化的 256 点单精度复数 FFT。
+ * @param input 指向 256 个设备端复数输入元素。
+ * @param output 用于保存 256 个设备端复数输出元素。
+ * @param inverse 是否执行反向变换；输出不进行 1/N 归一化。
+ * @return 无；输出按自然频率顺序写入。
+ */
 __global__ void fft256_decimation_in_frequency(const float2* input,
                                               float2* output, bool inverse) {
     __shared__ float2 shared_values[2][kFftSize256];
@@ -224,6 +277,14 @@ __global__ void fft256_decimation_in_frequency(const float2* input,
         value;
 }
 
+/**
+ * @brief 选择默认线程配置并启动对应 FFT kernel。
+ * @param input 指向设备端复数输入数组。
+ * @param output 指向设备端复数输出数组。
+ * @param fft_size FFT 点数，支持 256、512、1024、2048 和 4096。
+ * @param inverse 是否执行反向变换；反向变换不做归一化。
+ * @return CUDA 状态码；成功返回 cudaSuccess。
+ */
 cudaError_t launch_fft(const float2* input, float2* output, int fft_size,
                        bool inverse) {
     const int thread_count =
@@ -231,6 +292,15 @@ cudaError_t launch_fft(const float2* input, float2* output, int fft_size,
     return launch_fft_config(input, output, fft_size, thread_count, inverse);
 }
 
+/**
+ * @brief 按 FFT 点数和线程数选择 kernel 并提交设备执行。
+ * @param input 指向设备端复数输入数组。
+ * @param output 指向设备端复数输出数组。
+ * @param fft_size FFT 点数。
+ * @param thread_count 单个线程块的线程数。
+ * @param inverse 是否执行反向变换。
+ * @return CUDA 状态码；不支持的点数或线程配置返回相应错误。
+ */
 cudaError_t launch_fft_config(const float2* input, float2* output, int fft_size,
                               int thread_count, bool inverse) {
     switch (fft_size) {
@@ -301,6 +371,18 @@ cudaError_t launch_fft_config(const float2* input, float2* output, int fft_size,
     return cudaSuccess;
 }
 
+/**
+ * @brief 按默认线程配置重复运行 FFT，并计算单次平均耗时。
+ * @param input 指向设备端复数输入数组。
+ * @param output 指向设备端复数输出数组。
+ * @param fft_size FFT 点数。
+ * @param iterations kernel 启动次数。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param average_us 用于接收平均耗时，单位为微秒。
+ * @param inverse 是否执行反向变换。
+ * @return CUDA 状态码；不支持的点数返回 cudaErrorInvalidValue。
+ */
 cudaError_t benchmark_fft_iterations(const float2* input, float2* output,
                                      int fft_size, int iterations,
                                      cudaEvent_t start, cudaEvent_t stop,
@@ -331,6 +413,19 @@ cudaError_t benchmark_fft_iterations(const float2* input, float2* output,
     }
 }
 
+/**
+ * @brief 按指定线程配置重复运行 FFT，并计算单次平均耗时。
+ * @param input 指向设备端复数输入数组。
+ * @param output 指向设备端复数输出数组。
+ * @param fft_size FFT 点数。
+ * @param thread_count 单个线程块的线程数。
+ * @param iterations kernel 启动次数。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param average_us 用于接收平均耗时，单位为微秒。
+ * @param inverse 是否执行反向变换。
+ * @return CUDA 状态码；不支持的点数或线程配置返回错误。
+ */
 cudaError_t benchmark_fft_config(const float2* input, float2* output,
                                  int fft_size, int thread_count, int iterations,
                                  cudaEvent_t start, cudaEvent_t stop,
