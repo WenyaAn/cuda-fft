@@ -89,10 +89,11 @@ float benchmark_cufft(cufftHandle plan,
                       cufftComplex* device_input,
                       cufftComplex* device_output,
                       cudaEvent_t start,
-                      cudaEvent_t stop) {
+                      cudaEvent_t stop,
+                      int direction) {
     check_cuda(cudaEventRecord(start), "cudaEventRecord(start)");
     for (int i = 0; i < kBenchmarkIterations; ++i) {
-        check_cufft(cufftExecC2C(plan, device_input, device_output, CUFFT_FORWARD),
+        check_cufft(cufftExecC2C(plan, device_input, device_output, direction),
                     "cuFFT benchmark");
     }
     check_cuda(cudaEventRecord(stop), "cudaEventRecord(stop)");
@@ -187,23 +188,54 @@ int main() {
             check_cuda(cudaMemcpy(device_input, host_input.data(), bytes,
                                   cudaMemcpyHostToDevice),
                        "cudaMemcpy(input)");
-            check_cuda(launch_fft(device_input, custom_output, fft_size),
-                       "custom FFT launch");
-            check_cuda(cudaGetLastError(), "custom FFT launch");
-            check_cufft(cufftExecC2C(
-                            plan, reinterpret_cast<cufftComplex*>(device_input),
-                            cufft_output, CUFFT_FORWARD),
-                        "cufftExecC2C");
-            check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
-            check_cuda(cudaMemcpy(host_custom.data(), custom_output, bytes,
-                                  cudaMemcpyDeviceToHost),
-                       "cudaMemcpy(custom output)");
-            check_cuda(cudaMemcpy(host_cufft.data(), cufft_output, bytes,
-                                  cudaMemcpyDeviceToHost),
-                       "cudaMemcpy(cuFFT output)");
-            compare_outputs(host_custom, host_cufft,
-                            std::to_string(fft_size) + " " + test_name);
+            for (bool inverse : {false, true}) {
+                check_cuda(launch_fft(device_input, custom_output, fft_size,
+                                      inverse),
+                           "custom FFT launch");
+                check_cuda(cudaGetLastError(), "custom FFT launch");
+                check_cufft(cufftExecC2C(
+                                plan,
+                                reinterpret_cast<cufftComplex*>(device_input),
+                                cufft_output,
+                                inverse ? CUFFT_INVERSE : CUFFT_FORWARD),
+                            "cufftExecC2C");
+                check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+                check_cuda(cudaMemcpy(host_custom.data(), custom_output, bytes,
+                                      cudaMemcpyDeviceToHost),
+                           "cudaMemcpy(custom output)");
+                check_cuda(cudaMemcpy(host_cufft.data(), cufft_output, bytes,
+                                      cudaMemcpyDeviceToHost),
+                           "cudaMemcpy(cuFFT output)");
+                compare_outputs(
+                    host_custom, host_cufft,
+                    std::to_string(fft_size) + " " +
+                        (inverse ? "inverse " : "forward ") + test_name);
+            }
         }
+
+        const std::vector<float2> round_trip_input =
+            make_input("random", fft_size);
+        check_cuda(cudaMemcpy(device_input, round_trip_input.data(), bytes,
+                              cudaMemcpyHostToDevice),
+                   "cudaMemcpy(round-trip input)");
+        check_cuda(launch_fft(device_input, custom_output, fft_size),
+                   "custom forward round-trip launch");
+        check_cuda(cudaGetLastError(), "custom forward round-trip launch");
+        check_cuda(launch_fft(custom_output, device_input, fft_size, true),
+                   "custom inverse round-trip launch");
+        check_cuda(cudaGetLastError(), "custom inverse round-trip launch");
+        check_cuda(cudaDeviceSynchronize(), "round-trip synchronization");
+        check_cuda(cudaMemcpy(host_custom.data(), device_input, bytes,
+                              cudaMemcpyDeviceToHost),
+                   "cudaMemcpy(round-trip output)");
+        std::vector<float2> expected_round_trip(fft_size);
+        for (int i = 0; i < fft_size; ++i) {
+            expected_round_trip[i] =
+                make_float2(round_trip_input[i].x * fft_size,
+                            round_trip_input[i].y * fft_size);
+        }
+        compare_outputs(host_custom, expected_round_trip,
+                        std::to_string(fft_size) + " round trip (N*x)");
 
         std::vector<int> thread_counts = {256};
         if (fft_size >= 512) {
@@ -217,18 +249,33 @@ int main() {
         for (size_t config = 0; config < thread_counts.size(); ++config) {
             const int thread_count = thread_counts[config];
             config_samples[config].reserve(kConfigBenchmarkSamples);
-            check_cuda(launch_fft_config(device_input, custom_output, fft_size,
-                                         thread_count),
-                       "FFT config correctness launch");
-            check_cuda(cudaGetLastError(), "FFT config correctness launch");
-            check_cuda(cudaDeviceSynchronize(),
-                       "FFT config correctness synchronization");
-            check_cuda(cudaMemcpy(host_custom.data(), custom_output, bytes,
-                                  cudaMemcpyDeviceToHost),
-                       "cudaMemcpy(config output)");
-            compare_outputs(host_custom, host_cufft,
-                            std::to_string(fft_size) + " " +
-                                std::to_string(thread_count) + " threads");
+            for (bool inverse : {false, true}) {
+                check_cufft(cufftExecC2C(
+                                plan,
+                                reinterpret_cast<cufftComplex*>(device_input),
+                                cufft_output,
+                                inverse ? CUFFT_INVERSE : CUFFT_FORWARD),
+                            "cufftExecC2C(config correctness)");
+                check_cuda(cudaDeviceSynchronize(),
+                           "FFT config reference synchronization");
+                check_cuda(cudaMemcpy(host_cufft.data(), cufft_output, bytes,
+                                      cudaMemcpyDeviceToHost),
+                           "cudaMemcpy(config reference)");
+                check_cuda(launch_fft_config(device_input, custom_output,
+                                             fft_size, thread_count, inverse),
+                           "FFT config correctness launch");
+                check_cuda(cudaGetLastError(), "FFT config correctness launch");
+                check_cuda(cudaDeviceSynchronize(),
+                           "FFT config correctness synchronization");
+                check_cuda(cudaMemcpy(host_custom.data(), custom_output, bytes,
+                                      cudaMemcpyDeviceToHost),
+                           "cudaMemcpy(config output)");
+                compare_outputs(
+                    host_custom, host_cufft,
+                    std::to_string(fft_size) + " " +
+                        (inverse ? "inverse " : "forward ") +
+                        std::to_string(thread_count) + " threads");
+            }
             for (int i = 0; i < kWarmupIterations; ++i) {
                 check_cuda(launch_fft_config(device_input, custom_output,
                                              fft_size, thread_count),
@@ -273,50 +320,66 @@ int main() {
             check_cuda(launch_fft(device_input, custom_output, fft_size),
                        "custom FFT warmup launch");
             check_cuda(cudaGetLastError(), "custom FFT warmup launch");
+            check_cuda(launch_fft(device_input, custom_output, fft_size, true),
+                       "custom inverse FFT warmup launch");
+            check_cuda(cudaGetLastError(),
+                       "custom inverse FFT warmup launch");
             check_cufft(cufftExecC2C(
                             plan, reinterpret_cast<cufftComplex*>(device_input),
                             cufft_output, CUFFT_FORWARD),
                         "cuFFT warmup");
+            check_cufft(cufftExecC2C(
+                            plan, reinterpret_cast<cufftComplex*>(device_input),
+                            cufft_output, CUFFT_INVERSE),
+                        "cuFFT inverse warmup");
         }
         check_cuda(cudaDeviceSynchronize(), "benchmark warmup synchronization");
 
-        std::vector<float> custom_samples;
-        std::vector<float> cufft_samples;
-        custom_samples.reserve(kBenchmarkSamples);
-        cufft_samples.reserve(kBenchmarkSamples);
-        for (int sample = 0; sample < kBenchmarkSamples; ++sample) {
-            if (sample % 2 == 0) {
-                float custom_us = 0.0f;
-                check_cuda(benchmark_fft_iterations(
-                               device_input, custom_output, fft_size,
-                               kBenchmarkIterations, start, stop, &custom_us),
-                           "custom FFT benchmark");
-                custom_samples.push_back(custom_us);
-                cufft_samples.push_back(benchmark_cufft(
-                    plan, reinterpret_cast<cufftComplex*>(device_input),
-                    cufft_output, start, stop));
-            } else {
-                cufft_samples.push_back(benchmark_cufft(
-                    plan, reinterpret_cast<cufftComplex*>(device_input),
-                    cufft_output, start, stop));
-                float custom_us = 0.0f;
-                check_cuda(benchmark_fft_iterations(
-                               device_input, custom_output, fft_size,
-                               kBenchmarkIterations, start, stop, &custom_us),
-                           "custom FFT benchmark");
-                custom_samples.push_back(custom_us);
+        for (bool inverse : {false, true}) {
+            std::vector<float> custom_samples;
+            std::vector<float> cufft_samples;
+            custom_samples.reserve(kBenchmarkSamples);
+            cufft_samples.reserve(kBenchmarkSamples);
+            const int direction =
+                inverse ? CUFFT_INVERSE : CUFFT_FORWARD;
+            for (int sample = 0; sample < kBenchmarkSamples; ++sample) {
+                if (sample % 2 == 0) {
+                    float custom_us = 0.0f;
+                    check_cuda(benchmark_fft_iterations(
+                                   device_input, custom_output, fft_size,
+                                   kBenchmarkIterations, start, stop,
+                                   &custom_us, inverse),
+                               "custom FFT benchmark");
+                    custom_samples.push_back(custom_us);
+                    cufft_samples.push_back(benchmark_cufft(
+                        plan, reinterpret_cast<cufftComplex*>(device_input),
+                        cufft_output, start, stop, direction));
+                } else {
+                    cufft_samples.push_back(benchmark_cufft(
+                        plan, reinterpret_cast<cufftComplex*>(device_input),
+                        cufft_output, start, stop, direction));
+                    float custom_us = 0.0f;
+                    check_cuda(benchmark_fft_iterations(
+                                   device_input, custom_output, fft_size,
+                                   kBenchmarkIterations, start, stop,
+                                   &custom_us, inverse),
+                               "custom FFT benchmark");
+                    custom_samples.push_back(custom_us);
+                }
             }
-        }
 
-        const TimingStats custom_stats = summarize_timings(custom_samples);
-        const TimingStats cufft_stats = summarize_timings(cufft_samples);
-        std::printf(
-            "Performance (%d samples x %d FFTs/sample, transfers excluded):\n",
-            kBenchmarkSamples, kBenchmarkIterations);
-        print_timing_stats("Custom FFT", custom_stats);
-        print_timing_stats("cuFFT C2C", cufft_stats);
-        std::printf("  cuFFT/custom mean-time ratio: %.2fx\n",
-                    cufft_stats.mean / custom_stats.mean);
+            const TimingStats custom_stats = summarize_timings(custom_samples);
+            const TimingStats cufft_stats = summarize_timings(cufft_samples);
+            std::printf(
+                "%s performance (%d samples x %d FFTs/sample, transfers "
+                "excluded):\n",
+                inverse ? "Inverse" : "Forward", kBenchmarkSamples,
+                kBenchmarkIterations);
+            print_timing_stats("Custom FFT", custom_stats);
+            print_timing_stats("cuFFT C2C", cufft_stats);
+            std::printf("  cuFFT/custom mean-time ratio: %.2fx\n",
+                        cufft_stats.mean / custom_stats.mean);
+        }
 
         check_cufft(cufftDestroy(plan), "cufftDestroy");
         check_cuda(cudaFree(device_input), "cudaFree(input)");
