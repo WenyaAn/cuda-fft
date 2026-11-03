@@ -18,6 +18,8 @@ constexpr float kRelativeTolerance = 2.0e-4f;
 constexpr int kWarmupIterations = 100;
 constexpr int kBenchmarkIterations = 5000;
 constexpr int kBenchmarkSamples = 100;
+constexpr int kConfigBenchmarkIterations = 1000;
+constexpr int kConfigBenchmarkSamples = 30;
 
 void check_cuda(cudaError_t status, const char* operation) {
     if (status != cudaSuccess) {
@@ -202,6 +204,70 @@ int main() {
             compare_outputs(host_custom, host_cufft,
                             std::to_string(fft_size) + " " + test_name);
         }
+
+        std::vector<int> thread_counts = {256};
+        if (fft_size >= 512) {
+            thread_counts.push_back(512);
+        }
+        if (fft_size >= 1024) {
+            thread_counts.push_back(1024);
+        }
+
+        std::vector<std::vector<float>> config_samples(thread_counts.size());
+        for (size_t config = 0; config < thread_counts.size(); ++config) {
+            const int thread_count = thread_counts[config];
+            config_samples[config].reserve(kConfigBenchmarkSamples);
+            check_cuda(launch_fft_config(device_input, custom_output, fft_size,
+                                         thread_count),
+                       "FFT config correctness launch");
+            check_cuda(cudaGetLastError(), "FFT config correctness launch");
+            check_cuda(cudaDeviceSynchronize(),
+                       "FFT config correctness synchronization");
+            check_cuda(cudaMemcpy(host_custom.data(), custom_output, bytes,
+                                  cudaMemcpyDeviceToHost),
+                       "cudaMemcpy(config output)");
+            compare_outputs(host_custom, host_cufft,
+                            std::to_string(fft_size) + " " +
+                                std::to_string(thread_count) + " threads");
+            for (int i = 0; i < kWarmupIterations; ++i) {
+                check_cuda(launch_fft_config(device_input, custom_output,
+                                             fft_size, thread_count),
+                           "FFT config warmup launch");
+            }
+            check_cuda(cudaGetLastError(), "FFT config warmup launch");
+        }
+        check_cuda(cudaDeviceSynchronize(), "FFT config warmup synchronization");
+
+        for (int sample = 0; sample < kConfigBenchmarkSamples; ++sample) {
+            for (size_t config = 0; config < thread_counts.size(); ++config) {
+                float custom_us = 0.0f;
+                check_cuda(benchmark_fft_config(
+                               device_input, custom_output, fft_size,
+                               thread_counts[config],
+                               kConfigBenchmarkIterations, start, stop,
+                               &custom_us),
+                           "FFT config benchmark");
+                config_samples[config].push_back(custom_us);
+            }
+        }
+
+        size_t fastest_config = 0;
+        TimingStats fastest_stats = summarize_timings(config_samples[0]);
+        std::printf("Thread configuration tuning (%d samples x %d FFTs):\n",
+                    kConfigBenchmarkSamples, kConfigBenchmarkIterations);
+        for (size_t config = 0; config < thread_counts.size(); ++config) {
+            const TimingStats stats = summarize_timings(config_samples[config]);
+            char label[32];
+            std::snprintf(label, sizeof(label), "%d threads",
+                          thread_counts[config]);
+            print_timing_stats(label, stats);
+            if (stats.median < fastest_stats.median) {
+                fastest_config = config;
+                fastest_stats = stats;
+            }
+        }
+        std::printf("  fastest measured: %d threads (median %.3f us)\n",
+                    thread_counts[fastest_config], fastest_stats.median);
 
         for (int i = 0; i < kWarmupIterations; ++i) {
             check_cuda(launch_fft(device_input, custom_output, fft_size),

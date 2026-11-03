@@ -1,10 +1,11 @@
 # CUDA radix-2 FFT
 
 This project implements forward, single-precision, complex-to-complex radix-2
-FFTs for 256, 512, 1024, 2048, and 4096 points. The kernels use a 256-thread
-block, shared memory for cross-warp butterfly stages, and warp shuffles plus
-registers for the final stages. Twiddle factors are computed on the fly. The
-custom implementation does not use cuFFT or cuBLAS.
+FFTs for 256, 512, 1024, 2048, and 4096 points. The 256-point kernel uses 256
+threads, the 512-point kernel uses 512 threads, and larger sizes use 1024
+threads. Shared memory handles cross-warp butterfly stages, while warp shuffles
+and registers handle the final stages. Twiddle factors are computed on the fly.
+The custom implementation does not use cuFFT or cuBLAS.
 
 The test executable compares each custom FFT against cuFFT C2C for impulse,
 shifted impulse, constant, single-tone, and deterministic random inputs. It
