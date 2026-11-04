@@ -20,6 +20,9 @@ constexpr int kBenchmarkIterations = 5000;
 constexpr int kBenchmarkSamples = 100;
 constexpr int kConfigBenchmarkIterations = 1000;
 constexpr int kConfigBenchmarkSamples = 30;
+constexpr int kBatchCount = 1024;
+constexpr int kBatchBenchmarkIterations = 100;
+constexpr int kBatchBenchmarkSamples = 30;
 
 /**
  * @brief 检查 CUDA Runtime 调用结果，失败时输出错误并终止程序。
@@ -137,6 +140,42 @@ float benchmark_cufft(cufftHandle plan,
     check_cuda(cudaEventElapsedTime(&elapsed_ms, start, stop),
                "cudaEventElapsedTime");
     return elapsed_ms * 1000.0f / kBenchmarkIterations;
+}
+
+float benchmark_fft_batch(const FFTPlan* plan, const float2* device_input,
+                          float2* device_output, int batch_count,
+                          cudaEvent_t start, cudaEvent_t stop, int iterations,
+                          bool inverse) {
+    check_cuda(cudaEventRecord(start), "cudaEventRecord(batch start)");
+    for (int i = 0; i < iterations; ++i) {
+        check_cuda(launch_fft_plan_batch(plan, device_input, device_output,
+                                         batch_count, inverse),
+                   "batched custom FFT launch");
+    }
+    check_cuda(cudaGetLastError(), "batched custom FFT launch");
+    check_cuda(cudaEventRecord(stop), "cudaEventRecord(batch stop)");
+    check_cuda(cudaEventSynchronize(stop), "cudaEventSynchronize(batch stop)");
+    float elapsed_ms = 0.0f;
+    check_cuda(cudaEventElapsedTime(&elapsed_ms, start, stop),
+               "cudaEventElapsedTime(batch)");
+    return elapsed_ms * 1000.0f / iterations;
+}
+
+float benchmark_cufft_batch(cufftHandle plan, cufftComplex* device_input,
+                            cufftComplex* device_output, cudaEvent_t start,
+                            cudaEvent_t stop, int iterations, int direction) {
+    check_cuda(cudaEventRecord(start), "cudaEventRecord(cuFFT batch start)");
+    for (int i = 0; i < iterations; ++i) {
+        check_cufft(cufftExecC2C(plan, device_input, device_output, direction),
+                    "cuFFT batch benchmark");
+    }
+    check_cuda(cudaEventRecord(stop), "cudaEventRecord(cuFFT batch stop)");
+    check_cuda(cudaEventSynchronize(stop),
+               "cudaEventSynchronize(cuFFT batch stop)");
+    float elapsed_ms = 0.0f;
+    check_cuda(cudaEventElapsedTime(&elapsed_ms, start, stop),
+               "cudaEventElapsedTime(cuFFT batch)");
+    return elapsed_ms * 1000.0f / iterations;
 }
 
 struct TimingStats {
@@ -438,6 +477,118 @@ int main() {
                         cufft_stats.mean / custom_stats.mean);
         }
 
+        const size_t batch_elements =
+            static_cast<size_t>(fft_size) * kBatchCount;
+        const size_t batch_bytes = batch_elements * sizeof(float2);
+        std::vector<float2> host_batch_input =
+            make_input("random", static_cast<int>(batch_elements));
+        std::vector<float2> host_batch_custom(batch_elements);
+        std::vector<float2> host_batch_cufft(batch_elements);
+
+        float2* device_batch_input = nullptr;
+        float2* device_batch_custom = nullptr;
+        cufftComplex* device_batch_cufft = nullptr;
+        check_cuda(cudaMalloc(&device_batch_input, batch_bytes),
+                   "cudaMalloc(batch input)");
+        check_cuda(cudaMalloc(&device_batch_custom, batch_bytes),
+                   "cudaMalloc(batch custom output)");
+        check_cuda(cudaMalloc(&device_batch_cufft, batch_bytes),
+                   "cudaMalloc(batch cuFFT output)");
+        check_cuda(cudaMemcpy(device_batch_input, host_batch_input.data(),
+                             batch_bytes, cudaMemcpyHostToDevice),
+                   "cudaMemcpy(batch input)");
+
+        cufftHandle batch_plan;
+        check_cufft(cufftPlanMany(&batch_plan, 1, &fft_size, nullptr, 1,
+                                  fft_size, nullptr, 1, fft_size, CUFFT_C2C,
+                                  kBatchCount),
+                    "cufftPlanMany");
+
+        for (bool inverse : {false, true}) {
+            const int direction = inverse ? CUFFT_INVERSE : CUFFT_FORWARD;
+            check_cufft(cufftExecC2C(batch_plan, device_batch_input,
+                                     device_batch_cufft, direction),
+                        "cuFFT batch correctness");
+            check_cuda(launch_fft_plan_batch(
+                           custom_plan, device_batch_input, device_batch_custom,
+                           kBatchCount, inverse),
+                       "custom FFT batch correctness launch");
+            check_cuda(cudaGetLastError(), "custom FFT batch correctness launch");
+            check_cuda(cudaDeviceSynchronize(),
+                       "FFT batch correctness synchronization");
+            check_cuda(cudaMemcpy(host_batch_custom.data(), device_batch_custom,
+                                  batch_bytes, cudaMemcpyDeviceToHost),
+                       "cudaMemcpy(custom batch output)");
+            check_cuda(cudaMemcpy(host_batch_cufft.data(), device_batch_cufft,
+                                  batch_bytes, cudaMemcpyDeviceToHost),
+                       "cudaMemcpy(cuFFT batch output)");
+            compare_outputs(host_batch_custom, host_batch_cufft,
+                            std::to_string(fft_size) + " batch " +
+                                (inverse ? "inverse" : "forward"));
+
+            for (int i = 0; i < kWarmupIterations; ++i) {
+                check_cuda(launch_fft_plan_batch(
+                               custom_plan, device_batch_input,
+                               device_batch_custom, kBatchCount, inverse),
+                           "custom FFT batch warmup");
+                check_cufft(cufftExecC2C(batch_plan, device_batch_input,
+                                         device_batch_cufft, direction),
+                            "cuFFT batch warmup");
+            }
+            check_cuda(cudaDeviceSynchronize(),
+                       "FFT batch warmup synchronization");
+
+            std::vector<float> custom_batch_samples;
+            std::vector<float> cufft_batch_samples;
+            custom_batch_samples.reserve(kBatchBenchmarkSamples);
+            cufft_batch_samples.reserve(kBatchBenchmarkSamples);
+            for (int sample = 0; sample < kBatchBenchmarkSamples; ++sample) {
+                if (sample % 2 == 0) {
+                    custom_batch_samples.push_back(benchmark_fft_batch(
+                        custom_plan, device_batch_input, device_batch_custom,
+                        kBatchCount, start, stop, kBatchBenchmarkIterations,
+                        inverse));
+                    cufft_batch_samples.push_back(benchmark_cufft_batch(
+                        batch_plan, device_batch_input, device_batch_cufft,
+                        start, stop, kBatchBenchmarkIterations, direction));
+                } else {
+                    cufft_batch_samples.push_back(benchmark_cufft_batch(
+                        batch_plan, device_batch_input, device_batch_cufft,
+                        start, stop, kBatchBenchmarkIterations, direction));
+                    custom_batch_samples.push_back(benchmark_fft_batch(
+                        custom_plan, device_batch_input, device_batch_custom,
+                        kBatchCount, start, stop, kBatchBenchmarkIterations,
+                        inverse));
+                }
+            }
+
+            const TimingStats custom_batch_stats =
+                summarize_timings(custom_batch_samples);
+            const TimingStats cufft_batch_stats =
+                summarize_timings(cufft_batch_samples);
+            const double custom_per_fft =
+                custom_batch_stats.median / kBatchCount;
+            const double cufft_per_fft = cufft_batch_stats.median / kBatchCount;
+            std::printf(
+                "%s batch performance (%d transforms, median per batch):\n",
+                inverse ? "Inverse" : "Forward", kBatchCount);
+            std::printf(
+                "  planned batch %.3f us/batch, %.4f us/FFT, %.2f M FFT/s\n",
+                custom_batch_stats.median, custom_per_fft,
+                1.0 / custom_per_fft);
+            std::printf(
+                "  cuFFT PlanMany %.3f us/batch, %.4f us/FFT, %.2f M FFT/s\n",
+                cufft_batch_stats.median, cufft_per_fft, 1.0 / cufft_per_fft);
+            std::printf("  cuFFT/custom per-FFT time ratio: %.2fx\n",
+                        cufft_per_fft / custom_per_fft);
+        }
+
+        check_cufft(cufftDestroy(batch_plan), "cufftDestroy(batch)");
+        check_cuda(cudaFree(device_batch_input), "cudaFree(batch input)");
+        check_cuda(cudaFree(device_batch_custom),
+                   "cudaFree(batch custom output)");
+        check_cuda(cudaFree(device_batch_cufft),
+                   "cudaFree(batch cuFFT output)");
         check_cufft(cufftDestroy(plan), "cufftDestroy");
         check_cuda(destroy_fft_plan(&custom_plan), "destroy_fft_plan");
         check_cuda(cudaFree(device_input), "cudaFree(input)");

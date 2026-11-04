@@ -47,6 +47,19 @@ cudaError_t launch_fft_plan_config(const FFTPlan* plan, const float2* input,
                                    bool inverse = false);
 
 /**
+ * @brief 使用一个 CUDA block 并行执行批量独立 FFT。
+ * @param plan 已创建的 FFT plan。
+ * @param input 指向连续存放的 batch_count 个输入变换。
+ * @param output 用于保存连续存放的 batch_count 个输出变换。
+ * @param batch_count 批次中的变换数量，必须大于零。
+ * @param inverse 是否执行反向变换；反向变换不做 1/N 归一化。
+ * @return CUDA 状态码。
+ */
+cudaError_t launch_fft_plan_batch(const FFTPlan* plan, const float2* input,
+                                  float2* output, int batch_count,
+                                  bool inverse = false);
+
+/**
  * @brief 使用 plan 的默认线程配置重复执行 FFT 并测量平均耗时。
  * @param plan 已创建的 FFT plan。
  * @param input 指向设备端复数输入数据。

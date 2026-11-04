@@ -50,6 +50,20 @@ if (status != cudaSuccess) {
 }
 ```
 
+For many independent, contiguous transforms, use the batch API. It launches
+one block per transform; the batch contains `batch_count` adjacent arrays of
+`fft_size` complex values:
+
+```cpp
+status = launch_fft_plan_batch(plan, batch_input, batch_output, batch_count);
+if (status != cudaSuccess) {
+    // Handle the CUDA error.
+}
+```
+
+The benchmark checks batched forward and inverse results against
+`cufftPlanMany` and reports throughput for a 1024-transform batch.
+
 ## Build and run
 
 ```sh

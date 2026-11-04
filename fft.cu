@@ -91,8 +91,9 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
     __shared__ float2 shared_twiddle_factors[FFTSize / 2];
 
     const int thread = threadIdx.x;
+    const size_t base_offset = static_cast<size_t>(blockIdx.x) * FFTSize;
     for (int index = thread; index < FFTSize; index += blockDim.x) {
-        values[index] = input[index];
+        values[index] = input[base_offset + index];
     }
     for (int index = thread; index < FFTSize / 2; index += blockDim.x) {
         shared_twiddle_factors[index] = twiddle_factors[index];
@@ -157,8 +158,9 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
     #pragma unroll
     for (int item = 0; item < FFTSize / ThreadCount; ++item) {
         const int index = thread + item * ThreadCount;
-        output[__brev(static_cast<unsigned int>(index)) >>
-               (32 - fft_log2(FFTSize))] =
+        output[base_offset +
+               (__brev(static_cast<unsigned int>(index)) >>
+                (32 - fft_log2(FFTSize)))] =
             local_values[item];
     }
 }
@@ -233,6 +235,8 @@ __device__ void fft256_decimation_in_frequency_body(
     __shared__ float2 shared_twiddle_factors[kFFTSize256 / 2];
 
     const int index = threadIdx.x;
+    const size_t base_offset =
+        static_cast<size_t>(blockIdx.x) * kFFTSize256;
     for (int twiddle_index = index; twiddle_index < kFFTSize256 / 2;
          twiddle_index += blockDim.x) {
         shared_twiddle_factors[twiddle_index] =
@@ -241,8 +245,8 @@ __device__ void fft256_decimation_in_frequency_body(
     __syncthreads();
 
     if (index < kFFTSize256 / 2) {
-        const float2 even = input[index];
-        const float2 odd = input[index + kFFTSize256 / 2];
+        const float2 even = input[base_offset + index];
+        const float2 odd = input[base_offset + index + kFFTSize256 / 2];
         const float2 difference =
             make_float2(even.x - odd.x, even.y - odd.y);
         shared_values[0][index] =
@@ -308,7 +312,7 @@ __device__ void fft256_decimation_in_frequency_body(
         }
     }
 
-    output[reverse_bits_8(static_cast<unsigned int>(index))] =
+    output[base_offset + reverse_bits_8(static_cast<unsigned int>(index))] =
         value;
 }
 
@@ -332,23 +336,23 @@ namespace {
 
 cudaError_t launch_fft_plan_config_impl(const float2* input, float2* output,
                                         int fft_size, int thread_count,
-                                        bool inverse,
+                                        int grid_size, bool inverse,
                                         const float2* twiddle_factors) {
     switch (fft_size) {
         case 256:
             if (thread_count != kFFTThreads256) {
                 return cudaErrorInvalidConfiguration;
             }
-            fft256_decimation_in_frequency<<<1, kFFTThreads256>>>(
+            fft256_decimation_in_frequency<<<grid_size, kFFTThreads256>>>(
                 input, output, inverse, twiddle_factors);
             break;
         case 512:
             if (thread_count == 256) {
                 fft_radix2_decimation_in_frequency<512, 256>
-                    <<<1, 256>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 256>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 512) {
                 fft_radix2_decimation_in_frequency<512, 512>
-                    <<<1, 512>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 512>>>(input, output, inverse, twiddle_factors);
             } else {
                 return cudaErrorInvalidConfiguration;
             }
@@ -356,13 +360,13 @@ cudaError_t launch_fft_plan_config_impl(const float2* input, float2* output,
         case 1024:
             if (thread_count == 256) {
                 fft_radix2_decimation_in_frequency<1024, 256>
-                    <<<1, 256>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 256>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 512) {
                 fft_radix2_decimation_in_frequency<1024, 512>
-                    <<<1, 512>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 512>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 1024) {
                 fft_radix2_decimation_in_frequency<1024, 1024>
-                    <<<1, 1024>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 1024>>>(input, output, inverse, twiddle_factors);
             } else {
                 return cudaErrorInvalidConfiguration;
             }
@@ -370,13 +374,13 @@ cudaError_t launch_fft_plan_config_impl(const float2* input, float2* output,
         case 2048:
             if (thread_count == 256) {
                 fft_radix2_decimation_in_frequency<2048, 256>
-                    <<<1, 256>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 256>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 512) {
                 fft_radix2_decimation_in_frequency<2048, 512>
-                    <<<1, 512>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 512>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 1024) {
                 fft_radix2_decimation_in_frequency<2048, 1024>
-                    <<<1, 1024>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 1024>>>(input, output, inverse, twiddle_factors);
             } else {
                 return cudaErrorInvalidConfiguration;
             }
@@ -384,13 +388,13 @@ cudaError_t launch_fft_plan_config_impl(const float2* input, float2* output,
         case 4096:
             if (thread_count == 256) {
                 fft_radix2_decimation_in_frequency<4096, 256>
-                    <<<1, 256>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 256>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 512) {
                 fft_radix2_decimation_in_frequency<4096, 512>
-                    <<<1, 512>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 512>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 1024) {
                 fft_radix2_decimation_in_frequency<4096, 1024>
-                    <<<1, 1024>>>(input, output, inverse, twiddle_factors);
+                    <<<grid_size, 1024>>>(input, output, inverse, twiddle_factors);
             } else {
                 return cudaErrorInvalidConfiguration;
             }
@@ -499,7 +503,27 @@ cudaError_t launch_fft_plan_config(const FFTPlan* plan, const float2* input,
         return cudaErrorInvalidDevice;
     }
     return launch_fft_plan_config_impl(input, output, plan->fft_size,
-                                       thread_count, inverse,
+                                       thread_count, 1, inverse,
+                                       plan->twiddle_factors);
+}
+
+cudaError_t launch_fft_plan_batch(const FFTPlan* plan, const float2* input,
+                                  float2* output, int batch_count,
+                                  bool inverse) {
+    if (plan == nullptr || input == nullptr || output == nullptr ||
+        batch_count <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    int device = 0;
+    cudaError_t status = cudaGetDevice(&device);
+    if (status != cudaSuccess) {
+        return status;
+    }
+    if (device != plan->device) {
+        return cudaErrorInvalidDevice;
+    }
+    return launch_fft_plan_config_impl(input, output, plan->fft_size,
+                                       plan->thread_count, batch_count, inverse,
                                        plan->twiddle_factors);
 }
 

@@ -49,6 +49,31 @@ The benchmark's correctness checks passed for all tested sizes and both
 directions, including impulse, shifted impulse, constant, single-tone, random,
 and forward/inverse round-trip cases.
 
+## Batched throughput
+
+The batch API launches one block per independent transform. The benchmark
+compares a contiguous batch of 1024 transforms against `cufftPlanMany`, with
+both plans created before timing and transfers excluded. Correctness is checked
+for every element in the batch in both directions. The table shows forward
+medians from 30 samples of 100 batch launches; the per-transform figure is the
+batch median divided by 1024.
+
+| Points | One-at-a-time baseline (us/FFT) | Planned batch (us/batch) | Planned batch (us/FFT) | Effective throughput gain* | cuFFT PlanMany (us/FFT) | Custom batch / cuFFT time |
+|---:|---:|---:|---:|---:|---:|---:|
+| 256 | 3.062 | 6.267 | 0.0061 | 500x | 0.0034 | 1.8x |
+| 512 | 3.388 | 20.874 | 0.0204 | 166x | 0.0052 | 3.9x |
+| 1024 | 5.945 | 52.372 | 0.0511 | 116x | 0.0082 | 6.3x |
+| 2048 | 9.785 | 102.804 | 0.1004 | 97x | 0.0145 | 6.9x |
+| 4096 | 17.299 | 203.438 | 0.1987 | 87x | 0.0251 | 7.9x |
+
+`Effective throughput gain` is the one-at-a-time baseline per-transform time
+divided by the batched custom per-transform time. It compares processing the
+same number of independent transforms serially versus as a batch, not single-
+transform latency. The batch path substantially improves throughput over
+one-at-a-time launches, but cuFFT remains about 1.8x to 7.9x faster per
+transform in these measurements. Inverse batch timings were within 1% of the
+forward timings.
+
 ## Notes
 
 - At 256 points, the local kernel and cuFFT have similar measured latency.
