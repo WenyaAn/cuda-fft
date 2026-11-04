@@ -5,11 +5,12 @@ complex radix-2 FFTs for 256, 512, 1024, 2048, and 4096 points. The 256-point
 kernel uses 256 threads, the 512-point kernel uses 512 threads, and larger
 sizes use 1024 threads. Shared memory handles cross-warp butterfly stages,
 while warp shuffles and registers handle the final stages. A reusable
-`FFTPlan` caches the transform size, default thread configuration, and CUDA
-device. It uses the same on-the-fly twiddle computation as the legacy
-`launch_fft` APIs; precomputed twiddle lookup was benchmarked and was slower
-for the tested kernels. The custom implementation does not use cuFFT or
-cuBLAS.
+`FFTPlan` stores the transform size, default thread configuration, and CUDA
+device. Plan creation allocates device memory for and uploads a precomputed
+twiddle table. Each FFT block stages that table into shared memory once and
+reuses it throughout the butterfly stages. Destroy each plan on its associated
+device to release the table. FFT execution uses the plan-based API. The custom
+implementation does not use cuFFT or cuBLAS.
 
 The inverse follows cuFFT's unnormalized convention: applying an inverse FFT
 after a forward FFT returns the input multiplied by the FFT length. The test
@@ -23,7 +24,13 @@ excluded.
 
 Create one plan per transform size and reuse it for forward and inverse
 transforms. Plans are associated with the CUDA device current at creation time;
-launch and destroy them with that device selected.
+launch and destroy them with that device selected. Plan creation allocates
+`fft_size / 2` complex twiddle factors on the GPU and precomputes the forward
+factors on the host. Inverse launches use their complex conjugates. Each block
+copies the table into shared memory before computing; the kernel needs no
+additional device workspace. The former planless FFT launch and benchmark
+functions have been removed; create a plan and use `launch_fft_plan` or
+`launch_fft_plan_config`.
 
 ```cpp
 FFTPlan* plan = nullptr;
@@ -55,6 +62,10 @@ Run the same correctness checks and benchmark through CTest:
 
 ```sh
 ctest --test-dir build --output-on-failure
+```
+或
+```sh
+ctest --test-dir build --output-on-failure -V
 ```
 
 The default CUDA target is `sm_89` (GeForce RTX 4090). Override it with

@@ -1,13 +1,20 @@
 #include "fft.cuh"
 
+#include <cmath>
 #include <memory>
 #include <new>
+#include <vector>
 
 struct FFTPlan {
     int fft_size;
     int thread_count;
     int device;
+    float2* twiddle_factors;
 };
+
+__global__ void fft256_decimation_in_frequency(
+    const float2* input, float2* output, bool inverse,
+    const float2* twiddle_factors);
 
 namespace {
 
@@ -35,16 +42,10 @@ __device__ __forceinline__ unsigned int reverse_bits_8(unsigned int value) {
  * @param inverse 是否生成反向变换使用的共轭方向旋转因子。
  * @return 复数旋转因子 exp(±2πi·index/fft_size)。
  */
-__device__ __forceinline__ float2 twiddle_factor(int index, int fft_size,
-                                                 bool inverse) {
-    constexpr float kTwoPi = 6.2831853071795864769f;
-    float sine;
-    float cosine;
-
-    const float direction = inverse ? 1.0f : -1.0f;
-    __sincosf(direction * kTwoPi * static_cast<float>(index) / fft_size, &sine,
-              &cosine);
-    return make_float2(cosine, sine);
+__device__ __forceinline__ float2 twiddle_factor(
+    int index, bool inverse, const float2* twiddle_factors) {
+    const float2 factor = twiddle_factors[index];
+    return inverse ? make_float2(factor.x, -factor.y) : factor;
 }
 
 /**
@@ -84,12 +85,17 @@ __device__ __forceinline__ float2 complex_multiply(float2 lhs, float2 rhs) {
 template <int FFTSize, int ThreadCount>
 __global__ void fft_radix2_decimation_in_frequency(const float2* input,
                                                    float2* output,
-                                                   bool inverse) {
+                                                   bool inverse,
+                                                   const float2* twiddle_factors) {
     __shared__ float2 values[FFTSize];
+    __shared__ float2 shared_twiddle_factors[FFTSize / 2];
 
     const int thread = threadIdx.x;
     for (int index = thread; index < FFTSize; index += blockDim.x) {
         values[index] = input[index];
+    }
+    for (int index = thread; index < FFTSize / 2; index += blockDim.x) {
+        shared_twiddle_factors[index] = twiddle_factors[index];
     }
     __syncthreads();
 
@@ -111,8 +117,8 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
                 make_float2(even.x - odd.x, even.y - odd.y);
             values[odd_index] =
                 complex_multiply(difference,
-                                 twiddle_factor(offset * twiddle_step, FFTSize,
-                                                inverse));
+                                 twiddle_factor(offset * twiddle_step, inverse,
+                                                shared_twiddle_factors));
         }
         __syncthreads();
     }
@@ -142,7 +148,8 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
                     make_float2(partner.x - value.x, partner.y - value.y);
                 local_values[item] = complex_multiply(
                     difference,
-                    twiddle_factor(twiddle_index, FFTSize, inverse));
+                    twiddle_factor(twiddle_index, inverse,
+                                   shared_twiddle_factors));
             }
         }
     }
@@ -173,18 +180,20 @@ template <int FFTSize, int ThreadCount>
 cudaError_t benchmark_fft_iterations(const float2* input, float2* output,
                                      cudaEvent_t start, cudaEvent_t stop,
                                      int iterations, float* average_us,
-                                     bool inverse) {
+                                     bool inverse,
+                                     const float2* twiddle_factors) {
     cudaError_t status = cudaEventRecord(start);
     if (status != cudaSuccess) {
         return status;
     }
     for (int i = 0; i < iterations; ++i) {
         if constexpr (FFTSize == kFFTSize256) {
-            fft256_decimation_in_frequency<<<1, kFFTThreads256>>>(
-                input, output, inverse);
+            fft256_decimation_in_frequency
+                <<<1, kFFTThreads256>>>(input, output, inverse,
+                                        twiddle_factors);
         } else {
             fft_radix2_decimation_in_frequency<FFTSize, ThreadCount>
-                <<<1, ThreadCount>>>(input, output, inverse);
+                <<<1, ThreadCount>>>(input, output, inverse, twiddle_factors);
         }
     }
     status = cudaGetLastError();
@@ -218,10 +227,19 @@ cudaError_t benchmark_fft_iterations(const float2* input, float2* output,
  * @return 无；输出按自然频率顺序写入。
  */
 __device__ void fft256_decimation_in_frequency_body(
-    const float2* input, float2* output, bool inverse) {
+    const float2* input, float2* output, bool inverse,
+    const float2* twiddle_factors) {
     __shared__ float2 shared_values[2][kFFTSize256];
+    __shared__ float2 shared_twiddle_factors[kFFTSize256 / 2];
 
     const int index = threadIdx.x;
+    for (int twiddle_index = index; twiddle_index < kFFTSize256 / 2;
+         twiddle_index += blockDim.x) {
+        shared_twiddle_factors[twiddle_index] =
+            twiddle_factors[twiddle_index];
+    }
+    __syncthreads();
+
     if (index < kFFTSize256 / 2) {
         const float2 even = input[index];
         const float2 odd = input[index + kFFTSize256 / 2];
@@ -231,7 +249,8 @@ __device__ void fft256_decimation_in_frequency_body(
             make_float2(even.x + odd.x, even.y + odd.y);
         shared_values[0][index + kFFTSize256 / 2] =
             complex_multiply(difference,
-                             twiddle_factor(index, kFFTSize256, inverse));
+                             twiddle_factor(index, inverse,
+                                            shared_twiddle_factors));
     }
     __syncthreads();
 
@@ -247,7 +266,8 @@ __device__ void fft256_decimation_in_frequency_body(
             make_float2(even.x - odd.x, even.y - odd.y);
         shared_values[1][index] = complex_multiply(
             difference,
-            twiddle_factor((index & 63) * 2, kFFTSize256, inverse));
+            twiddle_factor((index & 63) * 2, inverse,
+                           shared_twiddle_factors));
     }
     __syncthreads();
 
@@ -263,7 +283,8 @@ __device__ void fft256_decimation_in_frequency_body(
             make_float2(even.x - odd.x, even.y - odd.y);
         shared_values[0][index] = complex_multiply(
             difference,
-            twiddle_factor((index & 31) * 4, kFFTSize256, inverse));
+            twiddle_factor((index & 31) * 4, inverse,
+                           shared_twiddle_factors));
     }
     __syncthreads();
 
@@ -282,8 +303,8 @@ __device__ void fft256_decimation_in_frequency_body(
             const int twiddle_index =
                 (index & (half_size - 1)) * (kFFTSize256 / stage_size);
             value = complex_multiply(difference,
-                                     twiddle_factor(twiddle_index,
-                                                    kFFTSize256, inverse));
+                                     twiddle_factor(twiddle_index, inverse,
+                                                    shared_twiddle_factors));
         }
     }
 
@@ -291,24 +312,11 @@ __device__ void fft256_decimation_in_frequency_body(
         value;
 }
 
-__global__ void fft256_decimation_in_frequency(const float2* input,
-                                              float2* output, bool inverse) {
-    fft256_decimation_in_frequency_body(input, output, inverse);
-}
-
-/**
- * @brief 选择默认线程配置并启动对应 FFT kernel。
- * @param input 指向设备端复数输入数组。
- * @param output 指向设备端复数输出数组。
- * @param fft_size FFT 点数，支持 256、512、1024、2048 和 4096。
- * @param inverse 是否执行反向变换；反向变换不做归一化。
- * @return CUDA 状态码；成功返回 cudaSuccess。
- */
-cudaError_t launch_fft(const float2* input, float2* output, int fft_size,
-                       bool inverse) {
-    const int thread_count =
-        fft_size >= 1024 ? 1024 : (fft_size == 512 ? 512 : kFFTThreads256);
-    return launch_fft_config(input, output, fft_size, thread_count, inverse);
+__global__ void fft256_decimation_in_frequency(
+    const float2* input, float2* output, bool inverse,
+    const float2* twiddle_factors) {
+    fft256_decimation_in_frequency_body(input, output, inverse,
+                                        twiddle_factors);
 }
 
 /**
@@ -322,24 +330,25 @@ cudaError_t launch_fft(const float2* input, float2* output, int fft_size,
  */
 namespace {
 
-cudaError_t launch_fft_config_impl(const float2* input, float2* output,
-                                   int fft_size, int thread_count,
-                                   bool inverse) {
+cudaError_t launch_fft_plan_config_impl(const float2* input, float2* output,
+                                        int fft_size, int thread_count,
+                                        bool inverse,
+                                        const float2* twiddle_factors) {
     switch (fft_size) {
         case 256:
             if (thread_count != kFFTThreads256) {
                 return cudaErrorInvalidConfiguration;
             }
             fft256_decimation_in_frequency<<<1, kFFTThreads256>>>(
-                input, output, inverse);
+                input, output, inverse, twiddle_factors);
             break;
         case 512:
             if (thread_count == 256) {
                 fft_radix2_decimation_in_frequency<512, 256>
-                    <<<1, 256>>>(input, output, inverse);
+                    <<<1, 256>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 512) {
                 fft_radix2_decimation_in_frequency<512, 512>
-                    <<<1, 512>>>(input, output, inverse);
+                    <<<1, 512>>>(input, output, inverse, twiddle_factors);
             } else {
                 return cudaErrorInvalidConfiguration;
             }
@@ -347,13 +356,13 @@ cudaError_t launch_fft_config_impl(const float2* input, float2* output,
         case 1024:
             if (thread_count == 256) {
                 fft_radix2_decimation_in_frequency<1024, 256>
-                    <<<1, 256>>>(input, output, inverse);
+                    <<<1, 256>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 512) {
                 fft_radix2_decimation_in_frequency<1024, 512>
-                    <<<1, 512>>>(input, output, inverse);
+                    <<<1, 512>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 1024) {
                 fft_radix2_decimation_in_frequency<1024, 1024>
-                    <<<1, 1024>>>(input, output, inverse);
+                    <<<1, 1024>>>(input, output, inverse, twiddle_factors);
             } else {
                 return cudaErrorInvalidConfiguration;
             }
@@ -361,13 +370,13 @@ cudaError_t launch_fft_config_impl(const float2* input, float2* output,
         case 2048:
             if (thread_count == 256) {
                 fft_radix2_decimation_in_frequency<2048, 256>
-                    <<<1, 256>>>(input, output, inverse);
+                    <<<1, 256>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 512) {
                 fft_radix2_decimation_in_frequency<2048, 512>
-                    <<<1, 512>>>(input, output, inverse);
+                    <<<1, 512>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 1024) {
                 fft_radix2_decimation_in_frequency<2048, 1024>
-                    <<<1, 1024>>>(input, output, inverse);
+                    <<<1, 1024>>>(input, output, inverse, twiddle_factors);
             } else {
                 return cudaErrorInvalidConfiguration;
             }
@@ -375,13 +384,13 @@ cudaError_t launch_fft_config_impl(const float2* input, float2* output,
         case 4096:
             if (thread_count == 256) {
                 fft_radix2_decimation_in_frequency<4096, 256>
-                    <<<1, 256>>>(input, output, inverse);
+                    <<<1, 256>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 512) {
                 fft_radix2_decimation_in_frequency<4096, 512>
-                    <<<1, 512>>>(input, output, inverse);
+                    <<<1, 512>>>(input, output, inverse, twiddle_factors);
             } else if (thread_count == 1024) {
                 fft_radix2_decimation_in_frequency<4096, 1024>
-                    <<<1, 1024>>>(input, output, inverse);
+                    <<<1, 1024>>>(input, output, inverse, twiddle_factors);
             } else {
                 return cudaErrorInvalidConfiguration;
             }
@@ -392,12 +401,6 @@ cudaError_t launch_fft_config_impl(const float2* input, float2* output,
     return cudaSuccess;
 }
 
-}
-
-cudaError_t launch_fft_config(const float2* input, float2* output, int fft_size,
-                              int thread_count, bool inverse) {
-    return launch_fft_config_impl(input, output, fft_size, thread_count,
-                                  inverse);
 }
 
 cudaError_t create_fft_plan(FFTPlan** plan, int fft_size) {
@@ -415,6 +418,33 @@ cudaError_t create_fft_plan(FFTPlan** plan, int fft_size) {
     std::unique_ptr<FFTPlan> new_plan(new (std::nothrow) FFTPlan{});
     if (!new_plan) {
         return cudaErrorMemoryAllocation;
+    }
+    std::vector<float2> host_twiddle_factors;
+    try {
+        host_twiddle_factors.resize(static_cast<size_t>(fft_size / 2));
+    } catch (const std::bad_alloc&) {
+        return cudaErrorMemoryAllocation;
+    }
+    constexpr double kTwoPi = 6.2831853071795864769;
+    for (int index = 0; index < fft_size / 2; ++index) {
+        const double angle =
+            -kTwoPi * static_cast<double>(index) / fft_size;
+        host_twiddle_factors[index] =
+            make_float2(static_cast<float>(std::cos(angle)),
+                        static_cast<float>(std::sin(angle)));
+    }
+    status = cudaMalloc(&new_plan->twiddle_factors,
+                        host_twiddle_factors.size() * sizeof(float2));
+    if (status != cudaSuccess) {
+        return status;
+    }
+    status = cudaMemcpy(new_plan->twiddle_factors,
+                        host_twiddle_factors.data(),
+                        host_twiddle_factors.size() * sizeof(float2),
+                        cudaMemcpyHostToDevice);
+    if (status != cudaSuccess) {
+        cudaFree(new_plan->twiddle_factors);
+        return status;
     }
     new_plan->fft_size = fft_size;
     new_plan->thread_count =
@@ -435,6 +465,10 @@ cudaError_t destroy_fft_plan(FFTPlan** plan) {
     }
     if (device != (*plan)->device) {
         return cudaErrorInvalidDevice;
+    }
+    status = cudaFree((*plan)->twiddle_factors);
+    if (status != cudaSuccess) {
+        return status;
     }
     delete *plan;
     *plan = nullptr;
@@ -464,50 +498,9 @@ cudaError_t launch_fft_plan_config(const FFTPlan* plan, const float2* input,
     if (device != plan->device) {
         return cudaErrorInvalidDevice;
     }
-    return launch_fft_config(input, output, plan->fft_size, thread_count,
-                             inverse);
-}
-
-/**
- * @brief 按默认线程配置重复运行 FFT，并计算单次平均耗时。
- * @param input 指向设备端复数输入数组。
- * @param output 指向设备端复数输出数组。
- * @param fft_size FFT 点数。
- * @param iterations kernel 启动次数。
- * @param start 计时开始 event。
- * @param stop 计时结束 event。
- * @param average_us 用于接收平均耗时，单位为微秒。
- * @param inverse 是否执行反向变换。
- * @return CUDA 状态码；不支持的点数返回 cudaErrorInvalidValue。
- */
-cudaError_t benchmark_fft_iterations(const float2* input, float2* output,
-                                     int fft_size, int iterations,
-                                     cudaEvent_t start, cudaEvent_t stop,
-                                     float* average_us, bool inverse) {
-    switch (fft_size) {
-        case 256:
-            return benchmark_fft_config(input, output, fft_size, 256,
-                                        iterations, start, stop, average_us,
-                                        inverse);
-        case 512:
-            return benchmark_fft_config(input, output, fft_size, 512,
-                                        iterations, start, stop, average_us,
-                                        inverse);
-        case 1024:
-            return benchmark_fft_config(input, output, fft_size, 1024,
-                                        iterations, start, stop, average_us,
-                                        inverse);
-        case 2048:
-            return benchmark_fft_config(input, output, fft_size, 1024,
-                                        iterations, start, stop, average_us,
-                                        inverse);
-        case 4096:
-            return benchmark_fft_config(input, output, fft_size, 1024,
-                                        iterations, start, stop, average_us,
-                                        inverse);
-        default:
-            return cudaErrorInvalidValue;
-    }
+    return launch_fft_plan_config_impl(input, output, plan->fft_size,
+                                       thread_count, inverse,
+                                       plan->twiddle_factors);
 }
 
 /**
@@ -525,67 +518,79 @@ cudaError_t benchmark_fft_iterations(const float2* input, float2* output,
  */
 namespace {
 
-cudaError_t benchmark_fft_config_impl(
+cudaError_t benchmark_fft_plan_config_impl(
     const float2* input, float2* output, int fft_size, int thread_count,
     int iterations, cudaEvent_t start, cudaEvent_t stop, float* average_us,
-    bool inverse) {
+    bool inverse, const float2* twiddle_factors) {
     switch (fft_size) {
         case 256:
             if (thread_count == 256) {
                 return benchmark_fft_iterations<256, 256>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             break;
         case 512:
             if (thread_count == 256) {
                 return benchmark_fft_iterations<512, 256>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             if (thread_count == 512) {
                 return benchmark_fft_iterations<512, 512>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             break;
         case 1024:
             if (thread_count == 256) {
                 return benchmark_fft_iterations<1024, 256>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             if (thread_count == 512) {
                 return benchmark_fft_iterations<1024, 512>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             if (thread_count == 1024) {
                 return benchmark_fft_iterations<1024, 1024>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             break;
         case 2048:
             if (thread_count == 256) {
                 return benchmark_fft_iterations<2048, 256>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             if (thread_count == 512) {
                 return benchmark_fft_iterations<2048, 512>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             if (thread_count == 1024) {
                 return benchmark_fft_iterations<2048, 1024>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             break;
         case 4096:
             if (thread_count == 256) {
                 return benchmark_fft_iterations<4096, 256>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             if (thread_count == 512) {
                 return benchmark_fft_iterations<4096, 512>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             if (thread_count == 1024) {
                 return benchmark_fft_iterations<4096, 1024>(
-                    input, output, start, stop, iterations, average_us, inverse);
+                    input, output, start, stop, iterations, average_us, inverse,
+                    twiddle_factors);
             }
             break;
         default:
@@ -594,15 +599,6 @@ cudaError_t benchmark_fft_config_impl(
     return cudaErrorInvalidConfiguration;
 }
 
-}
-
-cudaError_t benchmark_fft_config(const float2* input, float2* output,
-                                 int fft_size, int thread_count, int iterations,
-                                 cudaEvent_t start, cudaEvent_t stop,
-                                 float* average_us, bool inverse) {
-    return benchmark_fft_config_impl(
-        input, output, fft_size, thread_count, iterations, start, stop,
-        average_us, inverse);
 }
 
 cudaError_t benchmark_fft_plan_config(const FFTPlan* plan,
@@ -622,8 +618,9 @@ cudaError_t benchmark_fft_plan_config(const FFTPlan* plan,
     if (device != plan->device) {
         return cudaErrorInvalidDevice;
     }
-    return benchmark_fft_config(input, output, plan->fft_size, thread_count,
-                                iterations, start, stop, average_us, inverse);
+    return benchmark_fft_plan_config_impl(
+        input, output, plan->fft_size, thread_count, iterations, start, stop,
+        average_us, inverse, plan->twiddle_factors);
 }
 
 cudaError_t benchmark_fft_plan_iterations(const FFTPlan* plan,

@@ -394,29 +394,20 @@ int main() {
 
         for (bool inverse : {false, true}) {
             std::vector<float> custom_samples;
-            std::vector<float> on_the_fly_samples;
             std::vector<float> cufft_samples;
             custom_samples.reserve(kBenchmarkSamples);
-            on_the_fly_samples.reserve(kBenchmarkSamples);
             cufft_samples.reserve(kBenchmarkSamples);
             const int direction =
                 inverse ? CUFFT_INVERSE : CUFFT_FORWARD;
             for (int sample = 0; sample < kBenchmarkSamples; ++sample) {
                 if (sample % 2 == 0) {
                     float custom_us = 0.0f;
-                    float on_the_fly_us = 0.0f;
                     check_cuda(benchmark_fft_plan_iterations(
                                    custom_plan, device_input, custom_output,
                                    kBenchmarkIterations, start, stop,
                                    &custom_us, inverse),
                                "planned FFT benchmark");
-                    check_cuda(benchmark_fft_iterations(
-                                   device_input, custom_output, fft_size,
-                                   kBenchmarkIterations, start, stop,
-                                   &on_the_fly_us, inverse),
-                               "on-the-fly FFT benchmark");
                     custom_samples.push_back(custom_us);
-                    on_the_fly_samples.push_back(on_the_fly_us);
                     cufft_samples.push_back(benchmark_cufft(
                         plan, reinterpret_cast<cufftComplex*>(device_input),
                         cufft_output, start, stop, direction));
@@ -425,25 +416,16 @@ int main() {
                         plan, reinterpret_cast<cufftComplex*>(device_input),
                         cufft_output, start, stop, direction));
                     float custom_us = 0.0f;
-                    float on_the_fly_us = 0.0f;
-                    check_cuda(benchmark_fft_iterations(
-                                   device_input, custom_output, fft_size,
-                                   kBenchmarkIterations, start, stop,
-                                   &on_the_fly_us, inverse),
-                               "on-the-fly FFT benchmark");
                     check_cuda(benchmark_fft_plan_iterations(
                                    custom_plan, device_input, custom_output,
                                    kBenchmarkIterations, start, stop,
                                    &custom_us, inverse),
                                "planned FFT benchmark");
                     custom_samples.push_back(custom_us);
-                    on_the_fly_samples.push_back(on_the_fly_us);
                 }
             }
 
             const TimingStats custom_stats = summarize_timings(custom_samples);
-            const TimingStats on_the_fly_stats =
-                summarize_timings(on_the_fly_samples);
             const TimingStats cufft_stats = summarize_timings(cufft_samples);
             std::printf(
                 "%s performance (%d samples x %d FFTs/sample, transfers "
@@ -451,7 +433,6 @@ int main() {
                 inverse ? "Inverse" : "Forward", kBenchmarkSamples,
                 kBenchmarkIterations);
             print_timing_stats("Planned FFT", custom_stats);
-            print_timing_stats("On-the-fly", on_the_fly_stats);
             print_timing_stats("cuFFT C2C", cufft_stats);
             std::printf("  cuFFT/custom mean-time ratio: %.2fx\n",
                         cufft_stats.mean / custom_stats.mean);
