@@ -40,10 +40,11 @@
 ### 2. 批量 FFT 路径（已实现）
 
 `launch_fft_plan_batch` 让不同 block 并行处理连续存储的独立输入，每个 block
-执行一个 FFT。基准使用 1024 个变换，与单个 cuFFT 1D plan 的 1024 次顺序
-执行比较，不使用 `cufftPlanMany`。RTX 4090 上单次批量启动的自定义实现比
-逐次调用 cuFFT plan 快，但该结果包含逐次调用的发射开销，不代表 FFT 算术
-内核本身的速度对比；测量数据和限制见 [PERFORMANCE.md](./PERFORMANCE.md)。
+执行一个 FFT。基准使用 1024 个变换，分别与单个 cuFFT 1D plan 的 1024 次
+顺序执行和 `cufftPlanMany` 批量执行比较。自定义路径比逐次调用 cuFFT plan
+快，但该结果包含逐次调用的发射开销，不代表 FFT 算术内核本身的速度对比。
+当前实测 cuFFT PlanMany 对所有支持点数都更快。测量数据和限制见
+[PERFORMANCE.md](./PERFORMANCE.md)。
 
 继续优化时，可评估让一个 block 处理多个 FFT，或针对目标 batch size 调整
 线程配置。比较时应保持相同批次大小、输入输出布局、数据驻留方式和计时范围。

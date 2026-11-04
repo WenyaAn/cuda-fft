@@ -61,9 +61,9 @@ if (status != cudaSuccess) {
 }
 ```
 
-The benchmark checks batched forward and inverse results against repeated
-executions of a single-transform cuFFT plan and reports throughput for a
-1024-transform batch.
+The benchmark checks batched forward and inverse results against both
+`cufftPlanMany` and repeated executions of a single-transform cuFFT plan, and
+reports throughput for a 1024-transform batch.
 
 ## Build and run
 

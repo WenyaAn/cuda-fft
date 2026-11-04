@@ -53,20 +53,23 @@ and forward/inverse round-trip cases.
 
 The batch API launches one block per independent transform. The benchmark
 compares a contiguous batch of 1024 transforms against 1024 sequential
-`cufftExecC2C` calls using a single-transform cuFFT 1D plan; it does not use
-`cufftPlanMany`. Plan creation and host-device transfers are excluded.
-Correctness is checked for every element in the batch in both directions. The
-table shows forward medians from 30 samples. Each custom sample averages 100
-batch launches; each cuFFT sample executes the single-transform plan once for
-each of the 1024 inputs. Per-transform time is batch time divided by 1024.
+`cufftExecC2C` calls using a single-transform cuFFT 1D plan and against one
+`cufftPlanMany` execution. Plan creation and host-device transfers are excluded.
+Correctness is checked for every element in the batch in both directions:
+custom FFT results are compared with `cufftPlanMany`, and `cufftPlanMany` is
+also compared with the sequential single-plan results. The table shows forward
+medians from 30 samples. Each custom sample averages 100 batch launches; each
+PlanMany sample averages 100 executions; each sequential cuFFT sample executes
+the single-transform plan once for each of the 1024 inputs. Per-transform time
+is batch time divided by 1024.
 
-| Points | Custom batch (us/batch) | Custom batch (us/FFT) | Sequential cuFFT plan (us/batch) | Sequential cuFFT plan (us/FFT) | Custom batch speedup |
-|---:|---:|---:|---:|---:|---:|
-| 256 | 6.267 | 0.0061 | 2319.360 | 2.2650 | 370.10x |
-| 512 | 20.992 | 0.0205 | 2355.200 | 2.3000 | 112.20x |
-| 1024 | 52.500 | 0.0513 | 2753.552 | 2.6890 | 52.45x |
-| 2048 | 103.096 | 0.1007 | 3647.488 | 3.5620 | 35.38x |
-| 4096 | 204.052 | 0.1993 | 4322.816 | 4.2215 | 21.18x |
+| Points | Custom batch (us/batch) | Custom batch (us/FFT) | Sequential cuFFT plan (us/batch) | Sequential cuFFT plan (us/FFT) | cuFFT PlanMany (us/batch) | cuFFT PlanMany (us/FFT) | PlanMany/custom time |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 256 | 6.298 | 0.0062 | 3881.984 | 3.7910 | 3.891 | 0.0038 | 0.62x |
+| 512 | 20.977 | 0.0205 | 2357.248 | 2.3020 | 5.356 | 0.0052 | 0.26x |
+| 1024 | 52.521 | 0.0513 | 2754.560 | 2.6900 | 8.387 | 0.0082 | 0.16x |
+| 2048 | 103.081 | 0.1007 | 3647.488 | 3.5620 | 14.858 | 0.0145 | 0.14x |
+| 4096 | 204.042 | 0.1993 | 4333.568 | 4.2320 | 25.748 | 0.0251 | 0.13x |
 
 This is a comparison of execution strategies for a batch, not just FFT kernel
 arithmetic: the custom implementation launches one grid for the full batch,
@@ -75,8 +78,12 @@ the GPU timeline gaps caused by sequential submissions, so the custom speedup
 primarily reflects avoiding thousands of individual launches. It must not be
 interpreted as the custom FFT kernel being hundreds of times faster than cuFFT.
 For a comparison of batched kernel throughput with launch overhead amortized on
-both sides, use a cuFFT batched plan. Inverse measurements were within 1% of
-the forward timings.
+both sides, the `cufftPlanMany` column is the relevant comparison. cuFFT
+PlanMany is faster than the custom batch for every size in this run, by about
+1.6x to 7.7x per transform. Inverse measurements were within 1% of the forward
+timings. The sequential cuFFT result for 256 points was unusually high in this
+run; it is sensitive to host submission and GPU scheduling overhead and should
+not be used to infer kernel performance.
 
 ## Notes
 
