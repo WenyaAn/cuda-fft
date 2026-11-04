@@ -52,27 +52,31 @@ and forward/inverse round-trip cases.
 ## Batched throughput
 
 The batch API launches one block per independent transform. The benchmark
-compares a contiguous batch of 1024 transforms against `cufftPlanMany`, with
-both plans created before timing and transfers excluded. Correctness is checked
-for every element in the batch in both directions. The table shows forward
-medians from 30 samples of 100 batch launches; the per-transform figure is the
-batch median divided by 1024.
+compares a contiguous batch of 1024 transforms against 1024 sequential
+`cufftExecC2C` calls using a single-transform cuFFT 1D plan; it does not use
+`cufftPlanMany`. Plan creation and host-device transfers are excluded.
+Correctness is checked for every element in the batch in both directions. The
+table shows forward medians from 30 samples. Each custom sample averages 100
+batch launches; each cuFFT sample executes the single-transform plan once for
+each of the 1024 inputs. Per-transform time is batch time divided by 1024.
 
-| Points | One-at-a-time baseline (us/FFT) | Planned batch (us/batch) | Planned batch (us/FFT) | Effective throughput gain* | cuFFT PlanMany (us/FFT) | Custom batch / cuFFT time |
-|---:|---:|---:|---:|---:|---:|---:|
-| 256 | 3.062 | 6.267 | 0.0061 | 500x | 0.0034 | 1.8x |
-| 512 | 3.388 | 20.874 | 0.0204 | 166x | 0.0052 | 3.9x |
-| 1024 | 5.945 | 52.372 | 0.0511 | 116x | 0.0082 | 6.3x |
-| 2048 | 9.785 | 102.804 | 0.1004 | 97x | 0.0145 | 6.9x |
-| 4096 | 17.299 | 203.438 | 0.1987 | 87x | 0.0251 | 7.9x |
+| Points | Custom batch (us/batch) | Custom batch (us/FFT) | Sequential cuFFT plan (us/batch) | Sequential cuFFT plan (us/FFT) | Custom batch speedup |
+|---:|---:|---:|---:|---:|---:|
+| 256 | 6.267 | 0.0061 | 2319.360 | 2.2650 | 370.10x |
+| 512 | 20.992 | 0.0205 | 2355.200 | 2.3000 | 112.20x |
+| 1024 | 52.500 | 0.0513 | 2753.552 | 2.6890 | 52.45x |
+| 2048 | 103.096 | 0.1007 | 3647.488 | 3.5620 | 35.38x |
+| 4096 | 204.052 | 0.1993 | 4322.816 | 4.2215 | 21.18x |
 
-`Effective throughput gain` is the one-at-a-time baseline per-transform time
-divided by the batched custom per-transform time. It compares processing the
-same number of independent transforms serially versus as a batch, not single-
-transform latency. The batch path substantially improves throughput over
-one-at-a-time launches, but cuFFT remains about 1.8x to 7.9x faster per
-transform in these measurements. Inverse batch timings were within 1% of the
-forward timings.
+This is a comparison of execution strategies for a batch, not just FFT kernel
+arithmetic: the custom implementation launches one grid for the full batch,
+whereas the cuFFT plan is called once per transform. CUDA-event timings include
+the GPU timeline gaps caused by sequential submissions, so the custom speedup
+primarily reflects avoiding thousands of individual launches. It must not be
+interpreted as the custom FFT kernel being hundreds of times faster than cuFFT.
+For a comparison of batched kernel throughput with launch overhead amortized on
+both sides, use a cuFFT batched plan. Inverse measurements were within 1% of
+the forward timings.
 
 ## Notes
 
