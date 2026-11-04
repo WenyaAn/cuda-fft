@@ -206,7 +206,7 @@ int main() {
     check_cuda(cudaGetDeviceProperties(&properties, device),
                "cudaGetDeviceProperties");
     std::printf("GPU: %s; custom FFT launch: 1 block x %d threads\n",
-                properties.name, kFftThreads256);
+                properties.name, kFFTThreads256);
     cudaEvent_t start;
     cudaEvent_t stop;
     check_cuda(cudaEventCreate(&start), "cudaEventCreate(start)");
@@ -217,7 +217,7 @@ int main() {
         "impulse", "shifted impulse", "constant", "single tone", "random"};
     for (int fft_size : fft_sizes) {
         std::printf("\n=== %d-point C2C FFT ===\n", fft_size);
-        FftPlan* custom_plan = nullptr;
+        FFTPlan* custom_plan = nullptr;
         check_cuda(create_fft_plan(&custom_plan, fft_size), "create_fft_plan");
         float2* device_input = nullptr;
         float2* custom_output = nullptr;

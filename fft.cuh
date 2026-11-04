@@ -2,10 +2,10 @@
 
 #include <cuda_runtime.h>
 
-constexpr int kFftSize256 = 256;
-constexpr int kFftThreads256 = kFftSize256;
+constexpr int kFFTSize256 = 256;
+constexpr int kFFTThreads256 = kFFTSize256;
 
-struct FftPlan;
+struct FFTPlan;
 
 /**
  * @brief 创建可复用的 FFT plan，缓存变换点数、默认线程配置和设备。
@@ -13,14 +13,14 @@ struct FftPlan;
  * @param fft_size FFT 点数，支持 256、512、1024、2048 和 4096。
  * @return CUDA 状态码。
  */
-cudaError_t create_fft_plan(FftPlan** plan, int fft_size);
+cudaError_t create_fft_plan(FFTPlan** plan, int fft_size);
 
 /**
  * @brief 释放 FFT plan 持有的设备内存并将句柄置空。
  * @param plan 指向有效 FFT plan 句柄的指针。
  * @return CUDA 状态码。
  */
-cudaError_t destroy_fft_plan(FftPlan** plan);
+cudaError_t destroy_fft_plan(FFTPlan** plan);
 
 /**
  * @brief 使用 plan 的默认线程配置执行 FFT。
@@ -30,7 +30,7 @@ cudaError_t destroy_fft_plan(FftPlan** plan);
  * @param inverse 是否执行反向变换；反向变换不做 1/N 归一化。
  * @return CUDA 状态码。
  */
-cudaError_t launch_fft_plan(const FftPlan* plan, const float2* input,
+cudaError_t launch_fft_plan(const FFTPlan* plan, const float2* input,
                             float2* output, bool inverse = false);
 
 /**
@@ -42,7 +42,7 @@ cudaError_t launch_fft_plan(const FftPlan* plan, const float2* input,
  * @param inverse 是否执行反向变换；反向变换不做 1/N 归一化。
  * @return CUDA 状态码。
  */
-cudaError_t launch_fft_plan_config(const FftPlan* plan, const float2* input,
+cudaError_t launch_fft_plan_config(const FFTPlan* plan, const float2* input,
                                    float2* output, int thread_count,
                                    bool inverse = false);
 
@@ -58,7 +58,7 @@ cudaError_t launch_fft_plan_config(const FftPlan* plan, const float2* input,
  * @param inverse 是否执行反向变换。
  * @return CUDA 状态码。
  */
-cudaError_t benchmark_fft_plan_iterations(const FftPlan* plan,
+cudaError_t benchmark_fft_plan_iterations(const FFTPlan* plan,
                                           const float2* input, float2* output,
                                           int iterations, cudaEvent_t start,
                                           cudaEvent_t stop, float* average_us,
@@ -77,7 +77,7 @@ cudaError_t benchmark_fft_plan_iterations(const FftPlan* plan,
  * @param inverse 是否执行反向变换。
  * @return CUDA 状态码。
  */
-cudaError_t benchmark_fft_plan_config(const FftPlan* plan,
+cudaError_t benchmark_fft_plan_config(const FFTPlan* plan,
                                       const float2* input, float2* output,
                                       int thread_count, int iterations,
                                       cudaEvent_t start, cudaEvent_t stop,

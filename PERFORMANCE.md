@@ -19,7 +19,7 @@ plan creation are excluded. The program alternates which implementation runs
 first between samples. Times in the table are the benchmark's mean
 per-transform times.
 
-The local FFT uses a reusable `FftPlan` and one thread block. The plan caches
+The local FFT uses a reusable `FFTPlan` and one thread block. The plan caches
 the transform size and default thread count. Its kernel computes twiddle
 factors on the fly. The default thread count is 256 for 256 points, 512 for 512
 points, and 1024 for 1024 points and above. cuFFT uses a single `CUFFT_C2C`

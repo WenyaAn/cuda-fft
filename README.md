@@ -5,7 +5,7 @@ complex radix-2 FFTs for 256, 512, 1024, 2048, and 4096 points. The 256-point
 kernel uses 256 threads, the 512-point kernel uses 512 threads, and larger
 sizes use 1024 threads. Shared memory handles cross-warp butterfly stages,
 while warp shuffles and registers handle the final stages. A reusable
-`FftPlan` caches the transform size, default thread configuration, and CUDA
+`FFTPlan` caches the transform size, default thread configuration, and CUDA
 device. It uses the same on-the-fly twiddle computation as the legacy
 `launch_fft` APIs; precomputed twiddle lookup was benchmarked and was slower
 for the tested kernels. The custom implementation does not use cuFFT or
@@ -26,7 +26,7 @@ transforms. Plans are associated with the CUDA device current at creation time;
 launch and destroy them with that device selected.
 
 ```cpp
-FftPlan* plan = nullptr;
+FFTPlan* plan = nullptr;
 cudaError_t status = create_fft_plan(&plan, 2048);
 if (status != cudaSuccess) {
     // Handle the CUDA error.
