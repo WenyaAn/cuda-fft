@@ -12,6 +12,13 @@ struct FFTPlan {
     float2* twiddle_factors;  // 设备端正向变换旋转因子表。
 };
 
+struct FFTPlanFp64 {
+    int fft_size;
+    int thread_count;
+    int device;
+    double2* twiddle_factors;
+};
+
 __global__ void fft256_decimation_in_frequency(
     const float2* input, float2* output, bool inverse,
     const float2* twiddle_factors);
@@ -76,6 +83,18 @@ __host__ __device__ constexpr int fft_log2(int fft_size) {
 __device__ __forceinline__ float2 complex_multiply(float2 lhs, float2 rhs) {
     return make_float2(__fmaf_rn(-lhs.y, rhs.y, lhs.x * rhs.x),
                        __fmaf_rn(lhs.x, rhs.y, lhs.y * rhs.x));
+}
+
+__device__ __forceinline__ double2 twiddle_factor_fp64(
+    int index, bool inverse, const double2* twiddle_factors) {
+    const double2 factor = twiddle_factors[index];
+    return inverse ? make_double2(factor.x, -factor.y) : factor;
+}
+
+__device__ __forceinline__ double2 complex_multiply_fp64(double2 lhs,
+                                                          double2 rhs) {
+    return make_double2(__fma_rn(-lhs.y, rhs.y, lhs.x * rhs.x),
+                        __fma_rn(lhs.x, rhs.y, lhs.y * rhs.x));
 }
 
 /**
@@ -176,6 +195,85 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
                (__brev(static_cast<unsigned int>(index)) >>
                 (32 - fft_log2(FFTSize)))] =
             local_values[item];
+    }
+}
+
+template <int FFTSize, int ThreadCount>
+__global__ void fft_radix2_decimation_in_frequency_fp64(
+    const double2* input, double2* output, bool inverse,
+    const double2* twiddle_factors) {
+    extern __shared__ double2 values[];
+
+    const int thread = threadIdx.x;
+    const size_t base_offset = static_cast<size_t>(blockIdx.x) * FFTSize;
+    for (int index = thread; index < FFTSize; index += blockDim.x) {
+        values[index] = input[base_offset + index];
+    }
+    __syncthreads();
+
+    for (int stage_size = FFTSize; stage_size >= 64; stage_size >>= 1) {
+        const int half_size = stage_size / 2;
+        const int twiddle_step = FFTSize / stage_size;
+        for (int butterfly = thread; butterfly < FFTSize / 2;
+             butterfly += blockDim.x) {
+            const int group = butterfly / half_size;
+            const int offset = butterfly % half_size;
+            const int even_index = group * stage_size + offset;
+            const int odd_index = even_index + half_size;
+            const double2 even = values[even_index];
+            const double2 odd = values[odd_index];
+            values[even_index] =
+                make_double2(even.x + odd.x, even.y + odd.y);
+
+            const double2 difference =
+                make_double2(even.x - odd.x, even.y - odd.y);
+            values[odd_index] = complex_multiply_fp64(
+                difference,
+                twiddle_factor_fp64(offset * twiddle_step, inverse,
+                                    twiddle_factors));
+        }
+        __syncthreads();
+    }
+
+    double2 local_values[FFTSize / ThreadCount];
+    #pragma unroll
+    for (int item = 0; item < FFTSize / ThreadCount; ++item) {
+        local_values[item] = values[thread + item * ThreadCount];
+    }
+
+    #pragma unroll
+    for (int stage_size = 32; stage_size >= 2; stage_size >>= 1) {
+        const int half_size = stage_size / 2;
+        const int twiddle_index =
+            (thread & (half_size - 1)) * (FFTSize / stage_size);
+        #pragma unroll
+        for (int item = 0; item < FFTSize / ThreadCount; ++item) {
+            const double2 value = local_values[item];
+            const double2 partner = make_double2(
+                __longlong_as_double(__shfl_xor_sync(
+                    0xffffffffu, __double_as_longlong(value.x), half_size)),
+                __longlong_as_double(__shfl_xor_sync(
+                    0xffffffffu, __double_as_longlong(value.y), half_size)));
+            if ((thread & half_size) == 0) {
+                local_values[item] =
+                    make_double2(value.x + partner.x, value.y + partner.y);
+            } else {
+                const double2 difference =
+                    make_double2(partner.x - value.x, partner.y - value.y);
+                local_values[item] = complex_multiply_fp64(
+                    difference,
+                    twiddle_factor_fp64(twiddle_index, inverse,
+                                        twiddle_factors));
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int item = 0; item < FFTSize / ThreadCount; ++item) {
+        const int index = thread + item * ThreadCount;
+        output[base_offset +
+               (__brev(static_cast<unsigned int>(index)) >>
+                (32 - fft_log2(FFTSize)))] = local_values[item];
     }
 }
 
@@ -383,6 +481,69 @@ cudaError_t launch_fft_plan_config_impl(const float2* input, float2* output,
     return cudaSuccess;
 }
 
+cudaError_t launch_fft_plan_config_fp64_impl(
+    const double2* input, double2* output, int fft_size, int thread_count,
+    int grid_size, bool inverse, const double2* twiddle_factors) {
+#define LAUNCH_FP64(FFT_SIZE, THREAD_COUNT)                                  \
+    fft_radix2_decimation_in_frequency_fp64<FFT_SIZE, THREAD_COUNT>         \
+        <<<grid_size, THREAD_COUNT, FFT_SIZE * sizeof(double2)>>>(           \
+            input, output, inverse, twiddle_factors)
+    switch (fft_size) {
+        case 256:
+            if (thread_count != 256) {
+                return cudaErrorInvalidConfiguration;
+            }
+            LAUNCH_FP64(256, 256);
+            break;
+        case 512:
+            if (thread_count == 256) {
+                LAUNCH_FP64(512, 256);
+            } else if (thread_count == 512) {
+                LAUNCH_FP64(512, 512);
+            } else {
+                return cudaErrorInvalidConfiguration;
+            }
+            break;
+        case 1024:
+            if (thread_count == 256) {
+                LAUNCH_FP64(1024, 256);
+            } else if (thread_count == 512) {
+                LAUNCH_FP64(1024, 512);
+            } else if (thread_count == 1024) {
+                LAUNCH_FP64(1024, 1024);
+            } else {
+                return cudaErrorInvalidConfiguration;
+            }
+            break;
+        case 2048:
+            if (thread_count == 256) {
+                LAUNCH_FP64(2048, 256);
+            } else if (thread_count == 512) {
+                LAUNCH_FP64(2048, 512);
+            } else if (thread_count == 1024) {
+                LAUNCH_FP64(2048, 1024);
+            } else {
+                return cudaErrorInvalidConfiguration;
+            }
+            break;
+        case 4096:
+            if (thread_count == 256) {
+                LAUNCH_FP64(4096, 256);
+            } else if (thread_count == 512) {
+                LAUNCH_FP64(4096, 512);
+            } else if (thread_count == 1024) {
+                LAUNCH_FP64(4096, 1024);
+            } else {
+                return cudaErrorInvalidConfiguration;
+            }
+            break;
+        default:
+            return cudaErrorInvalidValue;
+    }
+#undef LAUNCH_FP64
+    return cudaSuccess;
+}
+
 }
 
 /**
@@ -548,4 +709,149 @@ cudaError_t launch_fft_plan_batch(const FFTPlan* plan, const float2* input,
     return launch_fft_plan_config_impl(input, output, plan->fft_size,
                                        plan->thread_count, batch_count, inverse,
                                        plan->twiddle_factors);
+}
+
+cudaError_t create_fft_plan_fp64(FFTPlanFp64** plan, int fft_size) {
+    if (plan == nullptr || *plan != nullptr ||
+        !is_supported_fft_size(fft_size)) {
+        return cudaErrorInvalidValue;
+    }
+
+    int device = 0;
+    cudaError_t status = cudaGetDevice(&device);
+    if (status != cudaSuccess) {
+        return status;
+    }
+    if (fft_size == 4096) {
+        constexpr int kSharedBytes = 4096 * sizeof(double2);
+        status = cudaFuncSetAttribute(
+            fft_radix2_decimation_in_frequency_fp64<4096, 256>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kSharedBytes);
+        if (status != cudaSuccess) {
+            return status;
+        }
+        status = cudaFuncSetAttribute(
+            fft_radix2_decimation_in_frequency_fp64<4096, 512>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kSharedBytes);
+        if (status != cudaSuccess) {
+            return status;
+        }
+        status = cudaFuncSetAttribute(
+            fft_radix2_decimation_in_frequency_fp64<4096, 1024>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kSharedBytes);
+        if (status != cudaSuccess) {
+            return status;
+        }
+    }
+
+    std::unique_ptr<FFTPlanFp64> new_plan(new (std::nothrow) FFTPlanFp64{});
+    if (!new_plan) {
+        return cudaErrorMemoryAllocation;
+    }
+
+    std::vector<double2> host_twiddle_factors;
+    try {
+        host_twiddle_factors.resize(static_cast<size_t>(fft_size / 2));
+    } catch (const std::bad_alloc&) {
+        return cudaErrorMemoryAllocation;
+    }
+    constexpr double kTwoPi = 6.2831853071795864769;
+    for (int index = 0; index < fft_size / 2; ++index) {
+        const double angle =
+            -kTwoPi * static_cast<double>(index) / fft_size;
+        host_twiddle_factors[index] =
+            make_double2(std::cos(angle), std::sin(angle));
+    }
+
+    status = cudaMalloc(&new_plan->twiddle_factors,
+                        host_twiddle_factors.size() * sizeof(double2));
+    if (status != cudaSuccess) {
+        return status;
+    }
+    status = cudaMemcpy(new_plan->twiddle_factors,
+                        host_twiddle_factors.data(),
+                        host_twiddle_factors.size() * sizeof(double2),
+                        cudaMemcpyHostToDevice);
+    if (status != cudaSuccess) {
+        cudaFree(new_plan->twiddle_factors);
+        return status;
+    }
+
+    new_plan->fft_size = fft_size;
+    new_plan->thread_count =
+        fft_size >= 1024 ? 1024 : (fft_size == 512 ? 512 : kFFTThreads256);
+    new_plan->device = device;
+    *plan = new_plan.release();
+    return cudaSuccess;
+}
+
+cudaError_t destroy_fft_plan_fp64(FFTPlanFp64** plan) {
+    if (plan == nullptr || *plan == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    int device = 0;
+    cudaError_t status = cudaGetDevice(&device);
+    if (status != cudaSuccess) {
+        return status;
+    }
+    if (device != (*plan)->device) {
+        return cudaErrorInvalidDevice;
+    }
+    status = cudaFree((*plan)->twiddle_factors);
+    if (status != cudaSuccess) {
+        return status;
+    }
+    delete *plan;
+    *plan = nullptr;
+    return cudaSuccess;
+}
+
+cudaError_t launch_fft_plan_fp64(const FFTPlanFp64* plan,
+                                 const double2* input, double2* output,
+                                 bool inverse) {
+    if (plan == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    return launch_fft_plan_config_fp64(plan, input, output,
+                                       plan->thread_count, inverse);
+}
+
+cudaError_t launch_fft_plan_config_fp64(const FFTPlanFp64* plan,
+                                        const double2* input,
+                                        double2* output, int thread_count,
+                                        bool inverse) {
+    if (plan == nullptr || input == nullptr || output == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    int device = 0;
+    cudaError_t status = cudaGetDevice(&device);
+    if (status != cudaSuccess) {
+        return status;
+    }
+    if (device != plan->device) {
+        return cudaErrorInvalidDevice;
+    }
+    return launch_fft_plan_config_fp64_impl(
+        input, output, plan->fft_size, thread_count, 1, inverse,
+        plan->twiddle_factors);
+}
+
+cudaError_t launch_fft_plan_batch_fp64(const FFTPlanFp64* plan,
+                                       const double2* input, double2* output,
+                                       int batch_count, bool inverse) {
+    if (plan == nullptr || input == nullptr || output == nullptr ||
+        batch_count <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    int device = 0;
+    cudaError_t status = cudaGetDevice(&device);
+    if (status != cudaSuccess) {
+        return status;
+    }
+    if (device != plan->device) {
+        return cudaErrorInvalidDevice;
+    }
+    return launch_fft_plan_config_fp64_impl(
+        input, output, plan->fft_size, plan->thread_count, batch_count,
+        inverse, plan->twiddle_factors);
 }

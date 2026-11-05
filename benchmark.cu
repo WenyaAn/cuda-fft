@@ -24,6 +24,11 @@ constexpr int kBatchCount = 1024;
 constexpr int kBatchBenchmarkIterations = 100;
 constexpr int kBatchBenchmarkSamples = 30;
 constexpr int kBatchWarmupIterations = 2;
+constexpr int kFp64BenchmarkIterations = 1000;
+constexpr int kFp64BenchmarkSamples = 30;
+constexpr int kFp64BatchCount = 1024;
+constexpr int kFp64BatchBenchmarkIterations = 100;
+constexpr int kFp64BatchBenchmarkSamples = 30;
 
 /**
  * @brief 检查 CUDA Runtime 调用结果，失败时输出错误并终止程序。
@@ -112,6 +117,364 @@ float compare_outputs(const std::vector<float2>& actual,
     }
     std::printf("PASS %-16s max error %.7g\n", test_name.c_str(), max_error);
     return max_error;
+}
+
+void compare_fp64_outputs(const std::vector<double2>& actual,
+                          const std::vector<double2>& expected,
+                          const std::string& test_name) {
+    double max_error = 0.0;
+    for (size_t i = 0; i < actual.size(); ++i) {
+        const double error =
+            std::hypot(actual[i].x - expected[i].x,
+                       actual[i].y - expected[i].y);
+        const double tolerance =
+            1.0e-10 + 1.0e-12 *
+                          std::hypot(expected[i].x, expected[i].y);
+        max_error = std::max(max_error, error);
+        if (error > tolerance) {
+            std::fprintf(stderr,
+                         "%s mismatch at bin %zu: error %.17g exceeds "
+                         "%.17g\n",
+                         test_name.c_str(), i, error, tolerance);
+            std::exit(EXIT_FAILURE);
+        }
+    }
+    std::printf("PASS %-32s max error %.7g\n", test_name.c_str(), max_error);
+}
+
+float time_fp64_custom(const FFTPlanFp64* plan, const double2* input,
+                       double2* output, int iterations, bool inverse,
+                       cudaEvent_t start, cudaEvent_t stop) {
+    check_cuda(cudaEventRecord(start), "cudaEventRecord(fp64 custom start)");
+    for (int i = 0; i < iterations; ++i) {
+        check_cuda(launch_fft_plan_fp64(plan, input, output, inverse),
+                   "fp64 custom benchmark launch");
+    }
+    check_cuda(cudaGetLastError(), "fp64 custom benchmark launch");
+    check_cuda(cudaEventRecord(stop), "cudaEventRecord(fp64 custom stop)");
+    check_cuda(cudaEventSynchronize(stop),
+               "cudaEventSynchronize(fp64 custom stop)");
+    float elapsed_ms = 0.0f;
+    check_cuda(cudaEventElapsedTime(&elapsed_ms, start, stop),
+               "cudaEventElapsedTime(fp64 custom)");
+    return elapsed_ms * 1000.0f / iterations;
+}
+
+float time_fp64_cufft(cufftHandle plan, cufftDoubleComplex* input,
+                      cufftDoubleComplex* output, int iterations, int direction,
+                      cudaEvent_t start, cudaEvent_t stop) {
+    check_cuda(cudaEventRecord(start), "cudaEventRecord(fp64 cuFFT start)");
+    for (int i = 0; i < iterations; ++i) {
+        check_cufft(cufftExecZ2Z(plan, input, output, direction),
+                    "fp64 cuFFT benchmark");
+    }
+    check_cuda(cudaEventRecord(stop), "cudaEventRecord(fp64 cuFFT stop)");
+    check_cuda(cudaEventSynchronize(stop),
+               "cudaEventSynchronize(fp64 cuFFT stop)");
+    float elapsed_ms = 0.0f;
+    check_cuda(cudaEventElapsedTime(&elapsed_ms, start, stop),
+               "cudaEventElapsedTime(fp64 cuFFT)");
+    return elapsed_ms * 1000.0f / iterations;
+}
+
+float time_fp64_custom_batch(const FFTPlanFp64* plan, const double2* input,
+                            double2* output, int batch_count, int iterations,
+                            bool inverse, cudaEvent_t start,
+                            cudaEvent_t stop) {
+    check_cuda(cudaEventRecord(start), "cudaEventRecord(fp64 batch start)");
+    for (int i = 0; i < iterations; ++i) {
+        check_cuda(launch_fft_plan_batch_fp64(plan, input, output, batch_count,
+                                              inverse),
+                   "fp64 custom batch benchmark");
+    }
+    check_cuda(cudaGetLastError(), "fp64 custom batch benchmark");
+    check_cuda(cudaEventRecord(stop), "cudaEventRecord(fp64 batch stop)");
+    check_cuda(cudaEventSynchronize(stop),
+               "cudaEventSynchronize(fp64 batch stop)");
+    float elapsed_ms = 0.0f;
+    check_cuda(cudaEventElapsedTime(&elapsed_ms, start, stop),
+               "cudaEventElapsedTime(fp64 custom batch)");
+    return elapsed_ms * 1000.0f / iterations;
+}
+
+float time_fp64_cufft_batch(cufftHandle plan, cufftDoubleComplex* input,
+                            cufftDoubleComplex* output, int iterations,
+                            int direction, cudaEvent_t start,
+                            cudaEvent_t stop) {
+    check_cuda(cudaEventRecord(start), "cudaEventRecord(fp64 PlanMany start)");
+    for (int i = 0; i < iterations; ++i) {
+        check_cufft(cufftExecZ2Z(plan, input, output, direction),
+                    "fp64 PlanMany benchmark");
+    }
+    check_cuda(cudaEventRecord(stop), "cudaEventRecord(fp64 PlanMany stop)");
+    check_cuda(cudaEventSynchronize(stop),
+               "cudaEventSynchronize(fp64 PlanMany stop)");
+    float elapsed_ms = 0.0f;
+    check_cuda(cudaEventElapsedTime(&elapsed_ms, start, stop),
+               "cudaEventElapsedTime(fp64 PlanMany)");
+    return elapsed_ms * 1000.0f / iterations;
+}
+
+double median(std::vector<float> samples) {
+    std::sort(samples.begin(), samples.end());
+    const size_t middle = samples.size() / 2;
+    return samples.size() % 2 == 0
+               ? (samples[middle - 1] + samples[middle]) / 2.0
+               : samples[middle];
+}
+
+void run_fp64_correctness_tests() {
+    const std::vector<int> fft_sizes = {256, 512, 1024, 2048, 4096};
+    std::mt19937_64 generator(123456u);
+    std::uniform_real_distribution<double> distribution(-1.0, 1.0);
+    cudaEvent_t start;
+    cudaEvent_t stop;
+    check_cuda(cudaEventCreate(&start), "cudaEventCreate(fp64 start)");
+    check_cuda(cudaEventCreate(&stop), "cudaEventCreate(fp64 stop)");
+
+    for (int fft_size : fft_sizes) {
+        FFTPlanFp64* custom_plan = nullptr;
+        check_cuda(create_fft_plan_fp64(&custom_plan, fft_size),
+                   "create_fft_plan_fp64");
+        const size_t bytes = static_cast<size_t>(fft_size) * sizeof(double2);
+        double2* device_input = nullptr;
+        double2* device_custom = nullptr;
+        cufftDoubleComplex* device_cufft = nullptr;
+        check_cuda(cudaMalloc(&device_input, bytes),
+                   "cudaMalloc(fp64 input)");
+        check_cuda(cudaMalloc(&device_custom, bytes),
+                   "cudaMalloc(fp64 custom output)");
+        check_cuda(cudaMalloc(&device_cufft, bytes),
+                   "cudaMalloc(fp64 cuFFT output)");
+
+        cufftHandle plan;
+        check_cufft(cufftPlan1d(&plan, fft_size, CUFFT_Z2Z, 1),
+                    "cufftPlan1d(fp64)");
+        std::vector<double2> host_input(fft_size);
+        std::vector<double2> host_custom(fft_size);
+        std::vector<double2> host_cufft(fft_size);
+        for (double2& value : host_input) {
+            value = make_double2(distribution(generator),
+                                 distribution(generator));
+        }
+        check_cuda(cudaMemcpy(device_input, host_input.data(), bytes,
+                              cudaMemcpyHostToDevice),
+                   "cudaMemcpy(fp64 input)");
+
+        std::vector<int> thread_counts = {256};
+        if (fft_size >= 512) {
+            thread_counts.push_back(512);
+        }
+        if (fft_size >= 1024) {
+            thread_counts.push_back(1024);
+        }
+        for (int thread_count : thread_counts) {
+            for (bool inverse : {false, true}) {
+                check_cufft(cufftExecZ2Z(
+                                plan, device_input, device_cufft,
+                                inverse ? CUFFT_INVERSE : CUFFT_FORWARD),
+                            "cufftExecZ2Z");
+                check_cuda(launch_fft_plan_config_fp64(
+                              custom_plan, device_input, device_custom,
+                              thread_count, inverse),
+                          "launch_fft_plan_config_fp64");
+                check_cuda(cudaGetLastError(),
+                           "launch_fft_plan_config_fp64");
+                check_cuda(cudaDeviceSynchronize(),
+                           "fp64 correctness synchronization");
+                check_cuda(cudaMemcpy(host_custom.data(), device_custom, bytes,
+                                      cudaMemcpyDeviceToHost),
+                           "cudaMemcpy(fp64 custom result)");
+                check_cuda(cudaMemcpy(host_cufft.data(), device_cufft, bytes,
+                                      cudaMemcpyDeviceToHost),
+                           "cudaMemcpy(fp64 cuFFT result)");
+                compare_fp64_outputs(
+                    host_custom, host_cufft,
+                    std::to_string(fft_size) + " fp64 " +
+                        (inverse ? "inverse " : "forward ") +
+                        std::to_string(thread_count) + " threads");
+            }
+        }
+
+        check_cuda(launch_fft_plan_fp64(custom_plan, device_input,
+                                        device_custom),
+                   "fp64 round-trip forward");
+        check_cuda(launch_fft_plan_fp64(custom_plan, device_custom,
+                                        device_input, true),
+                   "fp64 round-trip inverse");
+        check_cuda(cudaDeviceSynchronize(), "fp64 round-trip synchronization");
+        check_cuda(cudaMemcpy(host_custom.data(), device_input, bytes,
+                              cudaMemcpyDeviceToHost),
+                   "cudaMemcpy(fp64 round-trip result)");
+        std::vector<double2> host_round_trip(fft_size);
+        for (int i = 0; i < fft_size; ++i) {
+            host_round_trip[i] =
+                make_double2(host_input[i].x * fft_size,
+                             host_input[i].y * fft_size);
+        }
+        compare_fp64_outputs(host_custom, host_round_trip,
+                             std::to_string(fft_size) + " fp64 round trip");
+
+        const size_t batch_elements =
+            static_cast<size_t>(fft_size) * kFp64BatchCount;
+        const size_t batch_bytes = batch_elements * sizeof(double2);
+        double2* device_batch_input = nullptr;
+        double2* device_batch_custom = nullptr;
+        cufftDoubleComplex* device_batch_cufft = nullptr;
+        check_cuda(cudaMalloc(&device_batch_input, batch_bytes),
+                   "cudaMalloc(fp64 batch input)");
+        check_cuda(cudaMalloc(&device_batch_custom, batch_bytes),
+                   "cudaMalloc(fp64 batch custom output)");
+        check_cuda(cudaMalloc(&device_batch_cufft, batch_bytes),
+                   "cudaMalloc(fp64 batch cuFFT output)");
+        std::vector<double2> host_batch_input(batch_elements);
+        std::vector<double2> host_batch_custom(batch_elements);
+        std::vector<double2> host_batch_cufft(batch_elements);
+        for (double2& value : host_batch_input) {
+            value = make_double2(distribution(generator),
+                                 distribution(generator));
+        }
+        check_cuda(cudaMemcpy(device_batch_input, host_batch_input.data(),
+                              batch_bytes, cudaMemcpyHostToDevice),
+                   "cudaMemcpy(fp64 batch input)");
+
+        cufftHandle batch_plan;
+        check_cufft(cufftPlanMany(&batch_plan, 1, &fft_size, nullptr, 1,
+                                  fft_size, nullptr, 1, fft_size, CUFFT_Z2Z,
+                                  kFp64BatchCount),
+                    "cufftPlanMany(fp64)");
+        for (bool inverse : {false, true}) {
+            const int direction = inverse ? CUFFT_INVERSE : CUFFT_FORWARD;
+            check_cufft(cufftExecZ2Z(batch_plan, device_batch_input,
+                                     device_batch_cufft, direction),
+                        "cufftExecZ2Z(batch)");
+            check_cuda(launch_fft_plan_batch_fp64(
+                          custom_plan, device_batch_input, device_batch_custom,
+                          kFp64BatchCount, inverse),
+                      "launch_fft_plan_batch_fp64");
+            check_cuda(cudaGetLastError(),
+                       "launch_fft_plan_batch_fp64");
+            check_cuda(cudaDeviceSynchronize(),
+                       "fp64 batch synchronization");
+            check_cuda(cudaMemcpy(host_batch_custom.data(), device_batch_custom,
+                                  batch_bytes, cudaMemcpyDeviceToHost),
+                       "cudaMemcpy(fp64 custom batch result)");
+            check_cuda(cudaMemcpy(host_batch_cufft.data(), device_batch_cufft,
+                                  batch_bytes, cudaMemcpyDeviceToHost),
+                       "cudaMemcpy(fp64 cuFFT batch result)");
+            compare_fp64_outputs(
+                host_batch_custom, host_batch_cufft,
+                std::to_string(fft_size) + " fp64 batch " +
+                    (inverse ? "inverse" : "forward"));
+        }
+
+        for (bool inverse : {false, true}) {
+            const int direction = inverse ? CUFFT_INVERSE : CUFFT_FORWARD;
+            for (int i = 0; i < kWarmupIterations; ++i) {
+                check_cuda(launch_fft_plan_fp64(custom_plan, device_input,
+                                                device_custom, inverse),
+                           "fp64 custom benchmark warmup");
+                check_cufft(cufftExecZ2Z(plan, device_input, device_cufft,
+                                         direction),
+                            "fp64 cuFFT benchmark warmup");
+            }
+            check_cuda(cudaDeviceSynchronize(),
+                       "fp64 single benchmark warmup");
+            std::vector<float> custom_samples;
+            std::vector<float> cufft_samples;
+            custom_samples.reserve(kFp64BenchmarkSamples);
+            cufft_samples.reserve(kFp64BenchmarkSamples);
+            for (int sample = 0; sample < kFp64BenchmarkSamples; ++sample) {
+                if (sample % 2 == 0) {
+                    custom_samples.push_back(time_fp64_custom(
+                        custom_plan, device_input, device_custom,
+                        kFp64BenchmarkIterations, inverse, start, stop));
+                    cufft_samples.push_back(time_fp64_cufft(
+                        plan, device_input, device_cufft,
+                        kFp64BenchmarkIterations, direction, start, stop));
+                } else {
+                    cufft_samples.push_back(time_fp64_cufft(
+                        plan, device_input, device_cufft,
+                        kFp64BenchmarkIterations, direction, start, stop));
+                    custom_samples.push_back(time_fp64_custom(
+                        custom_plan, device_input, device_custom,
+                        kFp64BenchmarkIterations, inverse, start, stop));
+                }
+            }
+            const double custom_median = median(custom_samples);
+            const double cufft_median = median(cufft_samples);
+            std::printf(
+                "FP64 %d-point %s single: custom %.3f us, cuFFT %.3f us, "
+                "cuFFT/custom %.2fx (%d samples x %d)\n",
+                fft_size, inverse ? "inverse" : "forward", custom_median,
+                cufft_median, cufft_median / custom_median,
+                kFp64BenchmarkSamples, kFp64BenchmarkIterations);
+
+            for (int i = 0; i < kBatchWarmupIterations; ++i) {
+                check_cuda(launch_fft_plan_batch_fp64(
+                               custom_plan, device_batch_input,
+                               device_batch_custom, kFp64BatchCount, inverse),
+                           "fp64 custom batch benchmark warmup");
+                check_cufft(cufftExecZ2Z(batch_plan, device_batch_input,
+                                         device_batch_cufft, direction),
+                            "fp64 PlanMany benchmark warmup");
+            }
+            check_cuda(cudaDeviceSynchronize(),
+                       "fp64 batch benchmark warmup");
+            custom_samples.clear();
+            cufft_samples.clear();
+            custom_samples.reserve(kFp64BatchBenchmarkSamples);
+            cufft_samples.reserve(kFp64BatchBenchmarkSamples);
+            for (int sample = 0; sample < kFp64BatchBenchmarkSamples;
+                 ++sample) {
+                if (sample % 2 == 0) {
+                    custom_samples.push_back(time_fp64_custom_batch(
+                        custom_plan, device_batch_input, device_batch_custom,
+                        kFp64BatchCount, kFp64BatchBenchmarkIterations, inverse,
+                        start, stop));
+                    cufft_samples.push_back(time_fp64_cufft_batch(
+                        batch_plan, device_batch_input, device_batch_cufft,
+                        kFp64BatchBenchmarkIterations, direction, start, stop));
+                } else {
+                    cufft_samples.push_back(time_fp64_cufft_batch(
+                        batch_plan, device_batch_input, device_batch_cufft,
+                        kFp64BatchBenchmarkIterations, direction, start, stop));
+                    custom_samples.push_back(time_fp64_custom_batch(
+                        custom_plan, device_batch_input, device_batch_custom,
+                        kFp64BatchCount, kFp64BatchBenchmarkIterations, inverse,
+                        start, stop));
+                }
+            }
+            const double custom_batch_us = median(custom_samples);
+            const double cufft_batch_us = median(cufft_samples);
+            std::printf(
+                "FP64 %d-point %s batch (%d transforms): custom %.3f "
+                "us/batch (%.4f us/FFT), PlanMany %.3f us/batch "
+                "(%.4f us/FFT), PlanMany/custom %.2fx "
+                "(%d samples x %d batches)\n",
+                fft_size, inverse ? "inverse" : "forward", kFp64BatchCount,
+                custom_batch_us, custom_batch_us / kFp64BatchCount,
+                cufft_batch_us, cufft_batch_us / kFp64BatchCount,
+                cufft_batch_us / custom_batch_us, kFp64BatchBenchmarkSamples,
+                kFp64BatchBenchmarkIterations);
+        }
+
+        check_cufft(cufftDestroy(batch_plan), "cufftDestroy(fp64 batch)");
+        check_cufft(cufftDestroy(plan), "cufftDestroy(fp64)");
+        check_cuda(destroy_fft_plan_fp64(&custom_plan),
+                   "destroy_fft_plan_fp64");
+        check_cuda(cudaFree(device_batch_input),
+                   "cudaFree(fp64 batch input)");
+        check_cuda(cudaFree(device_batch_custom),
+                   "cudaFree(fp64 batch custom output)");
+        check_cuda(cudaFree(device_batch_cufft),
+                   "cudaFree(fp64 batch cuFFT output)");
+        check_cuda(cudaFree(device_input), "cudaFree(fp64 input)");
+        check_cuda(cudaFree(device_custom), "cudaFree(fp64 custom output)");
+        check_cuda(cudaFree(device_cufft), "cudaFree(fp64 cuFFT output)");
+    }
+    check_cuda(cudaEventDestroy(start), "cudaEventDestroy(fp64 start)");
+    check_cuda(cudaEventDestroy(stop), "cudaEventDestroy(fp64 stop)");
 }
 
 /**
@@ -401,6 +764,9 @@ int main() {
                "cudaGetDeviceProperties");
     std::printf("GPU: %s; custom FFT launch: 1 block x %d threads\n",
                 properties.name, kFFTThreads256);
+    std::printf("\n=== FP64 C2C FFT correctness ===\n");
+    run_fp64_correctness_tests();
+
     cudaEvent_t start;
     cudaEvent_t stop;
     check_cuda(cudaEventCreate(&start), "cudaEventCreate(start)");
