@@ -6,10 +6,10 @@
 #include <vector>
 
 struct FFTPlan {
-    int fft_size;
-    int thread_count;
-    int device;
-    float2* twiddle_factors;
+    int fft_size;             // 每次变换的复数元素数量。
+    int thread_count;         // 默认每个变换线程块的线程数。
+    int device;               // 创建此 plan 时所使用的 CUDA 设备。
+    float2* twiddle_factors;  // 设备端正向变换旋转因子表。
 };
 
 __global__ void fft256_decimation_in_frequency(
@@ -18,6 +18,11 @@ __global__ void fft256_decimation_in_frequency(
 
 namespace {
 
+/**
+ * @brief 检查 FFT 点数是否为当前实现支持的长度。
+ * @param fft_size 待检查的 FFT 点数。
+ * @return 支持 256、512、1024、2048 或 4096 点时返回 true，否则返回 false。
+ */
 bool is_supported_fft_size(int fft_size) {
     return fft_size == 256 || fft_size == 512 || fft_size == 1024 ||
            fft_size == 2048 || fft_size == 4096;
@@ -87,11 +92,13 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
                                                    float2* output,
                                                    bool inverse,
                                                    const float2* twiddle_factors) {
+    // 大尺寸蝶形阶段在共享内存中交换数据；旋转因子表也暂存于共享内存。
     __shared__ float2 values[FFTSize];
     __shared__ float2 shared_twiddle_factors[FFTSize / 2];
 
     const int thread = threadIdx.x;
     const size_t base_offset = static_cast<size_t>(blockIdx.x) * FFTSize;
+    // 当前 block 负责一个 FFT，线程协作加载输入和旋转因子。
     for (int index = thread; index < FFTSize; index += blockDim.x) {
         values[index] = input[base_offset + index];
     }
@@ -100,6 +107,8 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
     }
     __syncthreads();
 
+    // DIF 蝶形按段长从 FFTSize 逐级减半；跨 warp 数据通过共享内存交换，
+    // 每轮结束后同步，确保下一阶段读取到完整结果。
     for (int stage_size = FFTSize; stage_size >= 64; stage_size >>= 1) {
         const int half_size = stage_size / 2;
         const int twiddle_step = FFTSize / stage_size;
@@ -124,12 +133,15 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
         __syncthreads();
     }
 
+    // 将剩余数据从共享内存读入每个线程的寄存器，供 warp 内阶段使用。
     float2 local_values[FFTSize / ThreadCount];
     #pragma unroll
     for (int item = 0; item < FFTSize / ThreadCount; ++item) {
         local_values[item] = values[thread + item * ThreadCount];
     }
 
+    // 段长不超过一个 warp 后，通过 shuffle 在 lane 间交换配对值，
+    // 避免这些蝶形阶段继续访问共享内存和进行 block 级同步。
     #pragma unroll
     for (int stage_size = 32; stage_size >= 2; stage_size >>= 1) {
         const int half_size = stage_size / 2;
@@ -141,6 +153,7 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
             const float2 partner = make_float2(
                 __shfl_xor_sync(0xffffffffu, value.x, half_size),
                 __shfl_xor_sync(0xffffffffu, value.y, half_size));
+            // 每对蝶形中，一侧计算和，另一侧计算差并乘旋转因子。
             if ((thread & half_size) == 0) {
                 local_values[item] =
                     make_float2(value.x + partner.x, value.y + partner.y);
@@ -155,6 +168,7 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
         }
     }
 
+    // DIF 的末级结果为位反转顺序，写出时重排为自然频率顺序。
     #pragma unroll
     for (int item = 0; item < FFTSize / ThreadCount; ++item) {
         const int index = thread + item * ThreadCount;
@@ -164,60 +178,6 @@ __global__ void fft_radix2_decimation_in_frequency(const float2* input,
             local_values[item];
     }
 }
-
-/**
- * @brief 重复启动指定模板配置的 FFT，并用 CUDA events 计算平均耗时。
- * @tparam FFTSize FFT 点数。
- * @tparam ThreadCount 当前线程块的线程数。
- * @param input 指向设备端复数输入数组。
- * @param output 指向设备端复数输出数组。
- * @param start 计时开始 event。
- * @param stop 计时结束 event。
- * @param iterations FFT kernel 的启动次数。
- * @param average_us 用于接收单次平均执行时间，单位为微秒。
- * @param inverse 是否执行反向变换。
- * @return CUDA 状态码。
- */
-template <int FFTSize, int ThreadCount>
-cudaError_t benchmark_fft_iterations(const float2* input, float2* output,
-                                     cudaEvent_t start, cudaEvent_t stop,
-                                     int iterations, float* average_us,
-                                     bool inverse,
-                                     const float2* twiddle_factors) {
-    cudaError_t status = cudaEventRecord(start);
-    if (status != cudaSuccess) {
-        return status;
-    }
-    for (int i = 0; i < iterations; ++i) {
-        if constexpr (FFTSize == kFFTSize256) {
-            fft256_decimation_in_frequency
-                <<<1, kFFTThreads256>>>(input, output, inverse,
-                                        twiddle_factors);
-        } else {
-            fft_radix2_decimation_in_frequency<FFTSize, ThreadCount>
-                <<<1, ThreadCount>>>(input, output, inverse, twiddle_factors);
-        }
-    }
-    status = cudaGetLastError();
-    if (status != cudaSuccess) {
-        return status;
-    }
-    status = cudaEventRecord(stop);
-    if (status != cudaSuccess) {
-        return status;
-    }
-    status = cudaEventSynchronize(stop);
-    if (status != cudaSuccess) {
-        return status;
-    }
-    float elapsed_ms = 0.0f;
-    status = cudaEventElapsedTime(&elapsed_ms, start, stop);
-    if (status == cudaSuccess) {
-        *average_us = elapsed_ms * 1000.0f / iterations;
-    }
-    return status;
-}
-
 
 }
 
@@ -237,6 +197,7 @@ __device__ void fft256_decimation_in_frequency_body(
     const int index = threadIdx.x;
     const size_t base_offset =
         static_cast<size_t>(blockIdx.x) * kFFTSize256;
+    // 每个 block 处理一个 256 点 FFT；先将旋转因子表协作加载到共享内存。
     for (int twiddle_index = index; twiddle_index < kFFTSize256 / 2;
          twiddle_index += blockDim.x) {
         shared_twiddle_factors[twiddle_index] =
@@ -244,6 +205,8 @@ __device__ void fft256_decimation_in_frequency_body(
     }
     __syncthreads();
 
+    // 第一轮 DIF 蝶形配对距离为 128：每个线程计算一组和与差，
+    // 差值乘对应旋转因子后写入共享内存。
     if (index < kFFTSize256 / 2) {
         const float2 even = input[base_offset + index];
         const float2 odd = input[base_offset + index + kFFTSize256 / 2];
@@ -258,6 +221,7 @@ __device__ void fft256_decimation_in_frequency_body(
     }
     __syncthreads();
 
+    // 继续完成段长 128 的蝶形阶段，配对距离为 64。
     if ((index & 64) == 0) {
         const float2 even = shared_values[0][index];
         const float2 odd = shared_values[0][index | 64];
@@ -275,6 +239,7 @@ __device__ void fft256_decimation_in_frequency_body(
     }
     __syncthreads();
 
+    // 完成段长 64 的蝶形阶段，配对距离为 32；这些跨 warp 数据仍通过共享内存交换。
     if ((index & 32) == 0) {
         const float2 even = shared_values[1][index];
         const float2 odd = shared_values[1][index | 32];
@@ -292,10 +257,12 @@ __device__ void fft256_decimation_in_frequency_body(
     }
     __syncthreads();
 
+    // 将每个线程的当前值保存在寄存器中，后续小阶段完全在 warp 内完成。
     float2 value = shared_values[0][index];
     #pragma unroll
     for (int stage_size = 32; stage_size >= 2; stage_size >>= 1) {
         const int half_size = stage_size / 2;
+        // 通过 lane 索引异或 half_size 找到本轮蝶形配对线程。
         const float2 partner = make_float2(
             __shfl_xor_sync(0xffffffffu, value.x, half_size),
             __shfl_xor_sync(0xffffffffu, value.y, half_size));
@@ -312,10 +279,19 @@ __device__ void fft256_decimation_in_frequency_body(
         }
     }
 
+    // 将 DIF 产生的位反转排列写出为自然频率顺序。
     output[base_offset + reverse_bits_8(static_cast<unsigned int>(index))] =
         value;
 }
 
+/**
+ * @brief 256 点 FFT kernel 的全局入口，转发到专用设备端实现。
+ * @param input 指向设备端复数输入数组。
+ * @param output 用于保存自然频率顺序结果的设备端数组。
+ * @param inverse 是否执行不进行 1/N 归一化的逆向变换。
+ * @param twiddle_factors 指向设备端预计算的旋转因子表。
+ * @return 无；kernel 执行结果写入 output。
+ */
 __global__ void fft256_decimation_in_frequency(
     const float2* input, float2* output, bool inverse,
     const float2* twiddle_factors) {
@@ -323,17 +299,19 @@ __global__ void fft256_decimation_in_frequency(
                                         twiddle_factors);
 }
 
+namespace {
+
 /**
- * @brief 按 FFT 点数和线程数选择 kernel 并提交设备执行。
+ * @brief 根据 FFT 点数和线程配置选择 kernel 并提交到 CUDA grid 执行。
  * @param input 指向设备端复数输入数组。
  * @param output 指向设备端复数输出数组。
  * @param fft_size FFT 点数。
- * @param thread_count 单个线程块的线程数。
- * @param inverse 是否执行反向变换。
- * @return CUDA 状态码；不支持的点数或线程配置返回相应错误。
+ * @param thread_count 每个 block 的线程数。
+ * @param grid_size CUDA grid 中的 block 数；批量执行时通常等于 FFT 数量。
+ * @param inverse 是否执行不进行 1/N 归一化的逆向变换。
+ * @param twiddle_factors 指向设备端预计算的旋转因子表。
+ * @return CUDA 状态码；点数或线程配置不受支持时返回错误。
  */
-namespace {
-
 cudaError_t launch_fft_plan_config_impl(const float2* input, float2* output,
                                         int fft_size, int thread_count,
                                         int grid_size, bool inverse,
@@ -407,12 +385,20 @@ cudaError_t launch_fft_plan_config_impl(const float2* input, float2* output,
 
 }
 
+/**
+ * @brief 创建 FFT plan，预计算旋转因子并上传到当前 CUDA 设备。
+ * @param plan 接收新 plan 的指针；必须非空且初始值为 nullptr。
+ * @param fft_size FFT 点数，支持 256、512、1024、2048 和 4096。
+ * @return CUDA 状态码；参数、分配或 CUDA 操作失败时返回相应错误。
+ */
 cudaError_t create_fft_plan(FFTPlan** plan, int fft_size) {
+    // 避免覆盖已有 plan，并拒绝当前 kernel 不支持的变换点数。
     if (plan == nullptr || *plan != nullptr ||
         !is_supported_fft_size(fft_size)) {
         return cudaErrorInvalidValue;
     }
 
+    // 记录创建时的设备，后续执行和销毁都要求切换回该设备。
     int device = 0;
     cudaError_t status = cudaGetDevice(&device);
     if (status != cudaSuccess) {
@@ -423,6 +409,8 @@ cudaError_t create_fft_plan(FFTPlan** plan, int fft_size) {
     if (!new_plan) {
         return cudaErrorMemoryAllocation;
     }
+
+    // 在主机上预计算正向旋转因子，逆向变换时通过取共轭复用该表。
     std::vector<float2> host_twiddle_factors;
     try {
         host_twiddle_factors.resize(static_cast<size_t>(fft_size / 2));
@@ -437,6 +425,8 @@ cudaError_t create_fft_plan(FFTPlan** plan, int fft_size) {
             make_float2(static_cast<float>(std::cos(angle)),
                         static_cast<float>(std::sin(angle)));
     }
+
+    // 将旋转因子表上传到当前设备；上传失败时释放已分配的设备内存。
     status = cudaMalloc(&new_plan->twiddle_factors,
                         host_twiddle_factors.size() * sizeof(float2));
     if (status != cudaSuccess) {
@@ -450,6 +440,8 @@ cudaError_t create_fft_plan(FFTPlan** plan, int fft_size) {
         cudaFree(new_plan->twiddle_factors);
         return status;
     }
+
+    // 按变换规模设置默认 block 大小，并在初始化完成后才交付 plan 句柄。
     new_plan->fft_size = fft_size;
     new_plan->thread_count =
         fft_size >= 1024 ? 1024 : (fft_size == 512 ? 512 : kFFTThreads256);
@@ -458,6 +450,11 @@ cudaError_t create_fft_plan(FFTPlan** plan, int fft_size) {
     return cudaSuccess;
 }
 
+/**
+ * @brief 释放 plan 持有的设备端旋转因子表，并销毁 plan。
+ * @param plan 指向有效 plan 句柄的指针；成功后句柄置为 nullptr。
+ * @return CUDA 状态码；当前设备与 plan 创建设备不同时返回错误。
+ */
 cudaError_t destroy_fft_plan(FFTPlan** plan) {
     if (plan == nullptr || *plan == nullptr) {
         return cudaErrorInvalidValue;
@@ -479,6 +476,14 @@ cudaError_t destroy_fft_plan(FFTPlan** plan) {
     return cudaSuccess;
 }
 
+/**
+ * @brief 使用 plan 中记录的默认线程配置启动一次 FFT。
+ * @param plan 已创建且当前设备匹配的 FFT plan。
+ * @param input 指向设备端复数输入数据。
+ * @param output 用于保存设备端复数输出的缓冲区。
+ * @param inverse 是否执行不进行 1/N 归一化的逆向变换。
+ * @return CUDA 状态码；参数无效或设备不匹配时返回相应错误。
+ */
 cudaError_t launch_fft_plan(const FFTPlan* plan, const float2* input,
                             float2* output, bool inverse) {
     if (plan == nullptr) {
@@ -488,6 +493,15 @@ cudaError_t launch_fft_plan(const FFTPlan* plan, const float2* input,
                                   inverse);
 }
 
+/**
+ * @brief 使用指定线程数启动一次 FFT。
+ * @param plan 已创建且当前设备匹配的 FFT plan。
+ * @param input 指向设备端复数输入数据。
+ * @param output 用于保存设备端复数输出的缓冲区。
+ * @param thread_count 每个 CUDA block 的线程数。
+ * @param inverse 是否执行不进行 1/N 归一化的逆向变换。
+ * @return CUDA 状态码；参数、设备或线程配置无效时返回相应错误。
+ */
 cudaError_t launch_fft_plan_config(const FFTPlan* plan, const float2* input,
                                    float2* output, int thread_count,
                                    bool inverse) {
@@ -507,6 +521,15 @@ cudaError_t launch_fft_plan_config(const FFTPlan* plan, const float2* input,
                                        plan->twiddle_factors);
 }
 
+/**
+ * @brief 并行启动一批独立 FFT，每个 block 处理一个变换。
+ * @param plan 已创建且当前设备匹配的 FFT plan。
+ * @param input 连续存放 batch_count 个输入变换的设备缓冲区。
+ * @param output 用于保存连续批量结果的设备缓冲区。
+ * @param batch_count 批次中的变换数量，必须大于零。
+ * @param inverse 是否执行不进行 1/N 归一化的逆向变换。
+ * @return CUDA 状态码；参数无效或设备不匹配时返回相应错误。
+ */
 cudaError_t launch_fft_plan_batch(const FFTPlan* plan, const float2* input,
                                   float2* output, int batch_count,
                                   bool inverse) {
@@ -525,137 +548,4 @@ cudaError_t launch_fft_plan_batch(const FFTPlan* plan, const float2* input,
     return launch_fft_plan_config_impl(input, output, plan->fft_size,
                                        plan->thread_count, batch_count, inverse,
                                        plan->twiddle_factors);
-}
-
-/**
- * @brief 按指定线程配置重复运行 FFT，并计算单次平均耗时。
- * @param input 指向设备端复数输入数组。
- * @param output 指向设备端复数输出数组。
- * @param fft_size FFT 点数。
- * @param thread_count 单个线程块的线程数。
- * @param iterations kernel 启动次数。
- * @param start 计时开始 event。
- * @param stop 计时结束 event。
- * @param average_us 用于接收平均耗时，单位为微秒。
- * @param inverse 是否执行反向变换。
- * @return CUDA 状态码；不支持的点数或线程配置返回错误。
- */
-namespace {
-
-cudaError_t benchmark_fft_plan_config_impl(
-    const float2* input, float2* output, int fft_size, int thread_count,
-    int iterations, cudaEvent_t start, cudaEvent_t stop, float* average_us,
-    bool inverse, const float2* twiddle_factors) {
-    switch (fft_size) {
-        case 256:
-            if (thread_count == 256) {
-                return benchmark_fft_iterations<256, 256>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            break;
-        case 512:
-            if (thread_count == 256) {
-                return benchmark_fft_iterations<512, 256>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            if (thread_count == 512) {
-                return benchmark_fft_iterations<512, 512>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            break;
-        case 1024:
-            if (thread_count == 256) {
-                return benchmark_fft_iterations<1024, 256>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            if (thread_count == 512) {
-                return benchmark_fft_iterations<1024, 512>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            if (thread_count == 1024) {
-                return benchmark_fft_iterations<1024, 1024>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            break;
-        case 2048:
-            if (thread_count == 256) {
-                return benchmark_fft_iterations<2048, 256>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            if (thread_count == 512) {
-                return benchmark_fft_iterations<2048, 512>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            if (thread_count == 1024) {
-                return benchmark_fft_iterations<2048, 1024>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            break;
-        case 4096:
-            if (thread_count == 256) {
-                return benchmark_fft_iterations<4096, 256>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            if (thread_count == 512) {
-                return benchmark_fft_iterations<4096, 512>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            if (thread_count == 1024) {
-                return benchmark_fft_iterations<4096, 1024>(
-                    input, output, start, stop, iterations, average_us, inverse,
-                    twiddle_factors);
-            }
-            break;
-        default:
-            return cudaErrorInvalidValue;
-    }
-    return cudaErrorInvalidConfiguration;
-}
-
-}
-
-cudaError_t benchmark_fft_plan_config(const FFTPlan* plan,
-                                      const float2* input, float2* output,
-                                      int thread_count, int iterations,
-                                      cudaEvent_t start, cudaEvent_t stop,
-                                      float* average_us, bool inverse) {
-    if (plan == nullptr || input == nullptr || output == nullptr ||
-        iterations <= 0 || average_us == nullptr) {
-        return cudaErrorInvalidValue;
-    }
-    int device = 0;
-    cudaError_t status = cudaGetDevice(&device);
-    if (status != cudaSuccess) {
-        return status;
-    }
-    if (device != plan->device) {
-        return cudaErrorInvalidDevice;
-    }
-    return benchmark_fft_plan_config_impl(
-        input, output, plan->fft_size, thread_count, iterations, start, stop,
-        average_us, inverse, plan->twiddle_factors);
-}
-
-cudaError_t benchmark_fft_plan_iterations(const FFTPlan* plan,
-                                          const float2* input, float2* output,
-                                          int iterations, cudaEvent_t start,
-                                          cudaEvent_t stop, float* average_us,
-                                          bool inverse) {
-    if (plan == nullptr) {
-        return cudaErrorInvalidValue;
-    }
-    return benchmark_fft_plan_config(plan, input, output, plan->thread_count,
-                                     iterations, start, stop, average_us,
-                                     inverse);
 }

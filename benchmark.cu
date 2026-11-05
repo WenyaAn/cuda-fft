@@ -115,6 +115,104 @@ float compare_outputs(const std::vector<float2>& actual,
 }
 
 /**
+ * @brief 在测试程序中重复启动自定义 FFT，并用 CUDA event 计算平均耗时。
+ * @param plan 已创建的自定义 FFT plan。
+ * @param input 指向设备端复数输入数组。
+ * @param output 用于保存设备端复数输出的数组。
+ * @param thread_count 指定线程配置；使用默认配置时此参数不参与调用。
+ * @param use_default_config 是否通过默认配置的 plan 启动接口执行。
+ * @param iterations kernel 启动次数，必须大于零。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param average_us 用于接收单次平均执行时间，单位为微秒。
+ * @param inverse 是否执行不进行 1/N 归一化的逆向变换。
+ * @return CUDA 状态码。
+ */
+cudaError_t benchmark_custom_fft_impl(
+    const FFTPlan* plan, const float2* input, float2* output, int thread_count,
+    bool use_default_config, int iterations, cudaEvent_t start,
+    cudaEvent_t stop, float* average_us, bool inverse) {
+    if (plan == nullptr || input == nullptr || output == nullptr ||
+        iterations <= 0 || average_us == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+
+    cudaError_t status = cudaEventRecord(start);
+    if (status != cudaSuccess) {
+        return status;
+    }
+    for (int i = 0; i < iterations; ++i) {
+        status = use_default_config
+                     ? launch_fft_plan(plan, input, output, inverse)
+                     : launch_fft_plan_config(plan, input, output,
+                                              thread_count, inverse);
+        if (status != cudaSuccess) {
+            return status;
+        }
+    }
+    status = cudaGetLastError();
+    if (status != cudaSuccess) {
+        return status;
+    }
+    status = cudaEventRecord(stop);
+    if (status != cudaSuccess) {
+        return status;
+    }
+    status = cudaEventSynchronize(stop);
+    if (status != cudaSuccess) {
+        return status;
+    }
+    float elapsed_ms = 0.0f;
+    status = cudaEventElapsedTime(&elapsed_ms, start, stop);
+    if (status == cudaSuccess) {
+        *average_us = elapsed_ms * 1000.0f / iterations;
+    }
+    return status;
+}
+
+/**
+ * @brief 按指定线程配置测量自定义 FFT 的单次平均耗时。
+ * @param plan 已创建的自定义 FFT plan。
+ * @param input 指向设备端复数输入数组。
+ * @param output 用于保存设备端复数输出的数组。
+ * @param thread_count 单个线程块的线程数。
+ * @param iterations FFT kernel 启动次数。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param average_us 用于接收平均耗时，单位为微秒。
+ * @param inverse 是否执行逆向变换。
+ * @return CUDA 状态码。
+ */
+cudaError_t benchmark_custom_fft_config(
+    const FFTPlan* plan, const float2* input, float2* output, int thread_count,
+    int iterations, cudaEvent_t start, cudaEvent_t stop, float* average_us,
+    bool inverse = false) {
+    return benchmark_custom_fft_impl(plan, input, output, thread_count, false,
+                                     iterations, start, stop, average_us,
+                                     inverse);
+}
+
+/**
+ * @brief 按 plan 默认线程配置测量自定义 FFT 的单次平均耗时。
+ * @param plan 已创建的自定义 FFT plan。
+ * @param input 指向设备端复数输入数组。
+ * @param output 用于保存设备端复数输出的数组。
+ * @param iterations FFT kernel 启动次数。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param average_us 用于接收平均耗时，单位为微秒。
+ * @param inverse 是否执行逆向变换。
+ * @return CUDA 状态码。
+ */
+cudaError_t benchmark_custom_fft(
+    const FFTPlan* plan, const float2* input, float2* output, int iterations,
+    cudaEvent_t start, cudaEvent_t stop, float* average_us,
+    bool inverse = false) {
+    return benchmark_custom_fft_impl(plan, input, output, 0, true, iterations,
+                                     start, stop, average_us, inverse);
+}
+
+/**
  * @brief 重复执行 cuFFT C2C 变换并测量单次平均耗时。
  * @param plan 已创建的 cuFFT 一维变换计划。
  * @param device_input cuFFT 使用的设备端输入缓冲区。
@@ -143,6 +241,18 @@ float benchmark_cufft(cufftHandle plan,
     return elapsed_ms * 1000.0f / kBenchmarkIterations;
 }
 
+/**
+ * @brief 测量自定义 FFT kernel 对整批变换的平均执行时间。
+ * @param plan 已创建的自定义 FFT plan。
+ * @param device_input 连续存放 batch_count 个输入变换的设备缓冲区。
+ * @param device_output 用于保存批量变换结果的设备缓冲区。
+ * @param batch_count 批次中的 FFT 数量。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param iterations 重复启动整个批量 kernel 的次数。
+ * @param inverse 是否执行不归一化的逆向变换。
+ * @return 每批变换的平均耗时，单位为微秒；CUDA 调用失败时终止程序。
+ */
 float benchmark_fft_batch(const FFTPlan* plan, const float2* device_input,
                           float2* device_output, int batch_count,
                           cudaEvent_t start, cudaEvent_t stop, int iterations,
@@ -162,6 +272,18 @@ float benchmark_fft_batch(const FFTPlan* plan, const float2* device_input,
     return elapsed_ms * 1000.0f / iterations;
 }
 
+/**
+ * @brief 使用单变换 cuFFT plan 顺序处理一批 FFT 并测量整批耗时。
+ * @param plan 已创建的单变换 cuFFT 1D plan。
+ * @param device_input 连续存放 batch_count 个输入变换的设备缓冲区。
+ * @param device_output 用于保存批量变换结果的设备缓冲区。
+ * @param fft_size 每个变换的点数，用于计算批次内各输入输出的偏移。
+ * @param batch_count 批次中的 FFT 数量。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param direction CUFFT_FORWARD 或 CUFFT_INVERSE。
+ * @return 处理整批变换的耗时，单位为微秒；CUDA/cuFFT 调用失败时终止程序。
+ */
 float benchmark_cufft_plan_batch(cufftHandle plan, cufftComplex* device_input,
                                  cufftComplex* device_output, int fft_size,
                                  int batch_count, cudaEvent_t start,
@@ -182,6 +304,17 @@ float benchmark_cufft_plan_batch(cufftHandle plan, cufftComplex* device_input,
     return elapsed_ms * 1000.0f;
 }
 
+/**
+ * @brief 重复执行 cuFFT PlanMany 并测量单次批量变换的平均耗时。
+ * @param plan 已创建且批次数已配置的 cuFFT PlanMany 计划。
+ * @param device_input 连续存放整批输入变换的设备缓冲区。
+ * @param device_output 用于保存整批变换结果的设备缓冲区。
+ * @param start 计时开始 event。
+ * @param stop 计时结束 event。
+ * @param iterations 重复执行整批 cuFFT 变换的次数。
+ * @param direction CUFFT_FORWARD 或 CUFFT_INVERSE。
+ * @return 每批变换的平均耗时，单位为微秒；CUDA/cuFFT 调用失败时终止程序。
+ */
 float benchmark_cufft_many(cufftHandle plan, cufftComplex* device_input,
                            cufftComplex* device_output, cudaEvent_t start,
                            cudaEvent_t stop, int iterations, int direction) {
@@ -209,8 +342,8 @@ struct TimingStats {
 
 /**
  * @brief 汇总计时样本的均值、中位数、标准差和极值。
- * @param samples 每个元素代表一次批量计时得到的单次平均耗时。
- * @return 包含统计值的 TimingStats；samples 不应为空。
+ * @param samples 一组耗时样本；调用方应确保其非空。
+ * @return 包含统计结果的 TimingStats，时间单位与输入样本相同。
  */
 TimingStats summarize_timings(const std::vector<float>& samples) {
     std::vector<float> sorted_samples = samples;
@@ -260,6 +393,7 @@ void print_timing_stats(const char* label, const TimingStats& stats) {
  * @return 所有测试成功时返回 EXIT_SUCCESS；CUDA/cuFFT 调用失败时退出程序。
  */
 int main() {
+    // 选择测试 GPU，获取设备信息，并创建供所有基准复用的计时 event。
     int device = 0;
     check_cuda(cudaSetDevice(device), "cudaSetDevice");
     cudaDeviceProp properties{};
@@ -277,6 +411,7 @@ int main() {
         "impulse", "shifted impulse", "constant", "single tone", "random"};
     for (int fft_size : fft_sizes) {
         std::printf("\n=== %d-point C2C FFT ===\n", fft_size);
+        // 为当前点数创建自定义 FFT plan、cuFFT plan 及单次变换缓冲区。
         FFTPlan* custom_plan = nullptr;
         check_cuda(create_fft_plan(&custom_plan, fft_size), "create_fft_plan");
         float2* device_input = nullptr;
@@ -294,6 +429,7 @@ int main() {
                     "cufftPlan1d");
         std::vector<float2> host_custom(fft_size);
         std::vector<float2> host_cufft(fft_size);
+        // 用多种典型输入分别验证正向与逆向结果和 cuFFT 一致。
         for (const std::string& test_name : test_names) {
             const std::vector<float2> host_input =
                 make_input(test_name, fft_size);
@@ -325,6 +461,7 @@ int main() {
             }
         }
 
+        // 验证正向后接逆向变换得到 N 倍原输入（逆变换不归一化）。
         const std::vector<float2> round_trip_input =
             make_input("random", fft_size);
         check_cuda(cudaMemcpy(device_input, round_trip_input.data(), bytes,
@@ -359,6 +496,7 @@ int main() {
         }
 
         std::vector<std::vector<float>> config_samples(thread_counts.size());
+        // 检查候选线程数的正逆变换正确性，并预热各线程配置。
         for (size_t config = 0; config < thread_counts.size(); ++config) {
             const int thread_count = thread_counts[config];
             config_samples[config].reserve(kConfigBenchmarkSamples);
@@ -400,10 +538,11 @@ int main() {
         }
         check_cuda(cudaDeviceSynchronize(), "FFT config warmup synchronization");
 
+        // 多次采样各线程配置，按中位数选出当前尺寸下测得最快的配置。
         for (int sample = 0; sample < kConfigBenchmarkSamples; ++sample) {
             for (size_t config = 0; config < thread_counts.size(); ++config) {
                 float custom_us = 0.0f;
-                check_cuda(benchmark_fft_plan_config(
+                check_cuda(benchmark_custom_fft_config(
                                custom_plan, device_input, custom_output,
                                thread_counts[config],
                                kConfigBenchmarkIterations, start, stop,
@@ -431,6 +570,7 @@ int main() {
         std::printf("  fastest measured: %d threads (median %.3f us)\n",
                     thread_counts[fastest_config], fastest_stats.median);
 
+        // 预热单次 FFT 路径，降低首次启动和频率变化对正式计时的影响。
         for (int i = 0; i < kWarmupIterations; ++i) {
             check_cuda(launch_fft_plan(custom_plan, device_input,
                                        custom_output),
@@ -452,6 +592,7 @@ int main() {
         }
         check_cuda(cudaDeviceSynchronize(), "benchmark warmup synchronization");
 
+        // 交替测试顺序，减少固定先后顺序对正向/逆向单次延迟比较的偏差。
         for (bool inverse : {false, true}) {
             std::vector<float> custom_samples;
             std::vector<float> cufft_samples;
@@ -462,7 +603,7 @@ int main() {
             for (int sample = 0; sample < kBenchmarkSamples; ++sample) {
                 if (sample % 2 == 0) {
                     float custom_us = 0.0f;
-                    check_cuda(benchmark_fft_plan_iterations(
+                    check_cuda(benchmark_custom_fft(
                                    custom_plan, device_input, custom_output,
                                    kBenchmarkIterations, start, stop,
                                    &custom_us, inverse),
@@ -476,7 +617,7 @@ int main() {
                         plan, reinterpret_cast<cufftComplex*>(device_input),
                         cufft_output, start, stop, direction));
                     float custom_us = 0.0f;
-                    check_cuda(benchmark_fft_plan_iterations(
+                    check_cuda(benchmark_custom_fft(
                                    custom_plan, device_input, custom_output,
                                    kBenchmarkIterations, start, stop,
                                    &custom_us, inverse),
@@ -501,6 +642,7 @@ int main() {
         const size_t batch_elements =
             static_cast<size_t>(fft_size) * kBatchCount;
         const size_t batch_bytes = batch_elements * sizeof(float2);
+        // 分配连续批量输入/输出，并创建覆盖整个批次的 cuFFT PlanMany。
         std::vector<float2> host_batch_input =
             make_input("random", static_cast<int>(batch_elements));
         std::vector<float2> host_batch_custom(batch_elements);
@@ -526,6 +668,7 @@ int main() {
                                   kBatchCount),
                     "cufftPlanMany");
 
+        // 验证批量自定义 FFT、PlanMany 和逐个调用单变换 plan 的结果。
         for (bool inverse : {false, true}) {
             const int direction = inverse ? CUFFT_INVERSE : CUFFT_FORWARD;
             for (int batch_index = 0; batch_index < kBatchCount;
@@ -595,6 +738,7 @@ int main() {
             check_cuda(cudaDeviceSynchronize(),
                        "FFT batch warmup synchronization");
 
+            // 轮换三种批量执行方式的测量顺序，并统计每种方式的中位数。
             std::vector<float> custom_batch_samples;
             std::vector<float> cufft_batch_samples;
             std::vector<float> cufft_many_samples;
@@ -684,6 +828,7 @@ int main() {
                         cufft_many_per_fft / custom_per_fft);
         }
 
+        // 释放当前点数对应的计划和设备缓冲区，再进入下一尺寸。
         check_cufft(cufftDestroy(many_plan), "cufftDestroy(PlanMany)");
         check_cuda(cudaFree(device_batch_input), "cudaFree(batch input)");
         check_cuda(cudaFree(device_batch_custom),

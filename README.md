@@ -17,6 +17,19 @@ cuFFT 或 cuBLAS；测试和基准程序会使用 cuFFT 作为正确性参考和
 计时不包括主机与 GPU 之间的数据传输、cuFFT plan 创建以及自定义 FFT plan
 创建开销。
 
+## 代码结构
+
+- `CMakeLists.txt`：配置 CUDA/C++ 构建目标、链接 CUDA Runtime 和 cuFFT，并注册 CTest。
+- `fft.cuh`：声明 `FFTPlan` 的创建、销毁、单次执行和批量执行接口。
+- `fft.cu`：实现 FFT plan 管理、旋转因子准备，以及不同尺寸的 CUDA FFT kernel。
+- `benchmark.cu`：程序入口；运行正确性检查、线程配置测试和性能基准，并使用 cuFFT
+  作为参考实现。
+- `PERFORMANCE.md`：记录基准测试环境、方法和测量结果。
+- `OPTIMIZATION.md`：记录当前实现特点及后续优化方向。
+
+整体调用流程是：`benchmark.cu` 创建并复用 `FFTPlan`，通过 `fft.cuh` 中的 API
+调用 `fft.cu` 的 kernel；正确性检查和性能对比由基准程序负责。
+
 ## 可复用 FFT plan
 
 每种变换尺寸创建一个 plan，并在正向和逆向变换中复用。Plan 与创建时当前的
@@ -62,6 +75,9 @@ if (status != cudaSuccess) {
 cuFFT plan 的结果对比；同时报告 1024 个变换组成的批次的吞吐量。
 
 ## 构建和运行
+
+项目要求 **C++17**。CMake 会为 C++ 编译目标启用 C++17；CUDA `.cu` 源文件也
+使用了 C++17 特性（例如 `if constexpr`），因此需要支持 C++17 的 CUDA 编译器。
 
 ```sh
 cmake -S . -B build
