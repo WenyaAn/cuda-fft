@@ -8,14 +8,23 @@ kernel 使用 512 个线程，更大尺寸使用 1024 个线程。跨 warp 的�
 可复用的 `FFTPlan` 保存 FFT 点数、默认线程配置和 CUDA 设备信息。创建 plan
 时会在 GPU 上分配并上传预计算的旋转因子表。每个 FFT block 会先将旋转因子表
 载入共享内存，并在各蝶形阶段中重复使用。请在创建 plan 时对应的 CUDA 设备
-上执行和销毁该 plan。FFT 执行使用基于 plan 的 API。自定义 FFT 实现不依赖
-cuFFT 或 cuBLAS；测试和基准程序会使用 cuFFT 作为正确性参考和性能对比。
+上执行和销毁该 plan。FFT 执行使用基于 plan 的 API。
+
+FFT kernel 直接使用 CUDA Runtime API 进行设备管理、内存操作和 kernel 启动；没有
+调用 cuFFT、cuBLAS、cuRAND 等 CUDA 数学或计算库，也没有直接调用 CUDA Driver
+API。只有测试和基准程序使用 cuFFT，作为正确性参考和性能对比；cuBLAS、
+cuRAND 等库不参与本项目的构建和运行。
 
 逆向变换遵循 cuFFT 的非归一化约定：对输入先执行正向 FFT，再执行逆向 FFT，
 结果为原始输入乘以 FFT 点数。测试程序会将两个方向的结果与 cuFFT C2C 对比，
 并检查正逆变换的往返结果。程序预热后会报告自定义 kernel 和 cuFFT 的耗时；
 计时不包括主机与 GPU 之间的数据传输、cuFFT plan 创建以及自定义 FFT plan
 创建开销。
+
+当前测试覆盖的所有点数和两个变换方向均通过正确性检查。在 RTX 4090 上，
+256 点自定义 FFT 与 cuFFT 的单次延迟接近，512 点及以上 cuFFT 更快；批量测试中，
+cuFFT PlanMany 对所有测试点数均快于自定义批量实现。以上性能结论仅适用于报告
+中的测试环境和方法，详细数据见 [PERFORMANCE.md](./PERFORMANCE.md)。
 
 ## 代码结构
 
