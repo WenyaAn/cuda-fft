@@ -1,69 +1,66 @@
-# CUDA FFT Performance
+# CUDA FFT 性能报告
 
-## Test environment
+## 测试环境
 
-- Date: 2026-11-04
-- GPU: NVIDIA GeForce RTX 4090 (benchmark ran on CUDA device 0)
-- Driver: 590.44.01
-- CUDA runtime reported by `nvidia-smi`: 13.1
-- Precision and transform: single-precision complex-to-complex (C2C)
-- Sizes: 256, 512, 1024, 2048, and 4096 points
+- 日期：2026-11-04
+- GPU：NVIDIA GeForce RTX 4090（基准测试运行在 CUDA 设备 0 上）
+- 驱动版本：590.44.01
+- `nvidia-smi` 报告的 CUDA 运行时版本：13.1
+- 精度和变换类型：单精度复数到复数（C2C）
+- FFT 点数：256、512、1024、2048 和 4096
 
-## Method
+## 测试方法
 
-Results below were collected by building and running `fft_benchmark` in this
-repository on 2026-11-04. The program performs 100 warmup launches, then
-collects 100 timing samples of 5,000 transforms each. CUDA events measure
-device execution; host-device transfers, custom FFT plan creation, and cuFFT
-plan creation are excluded. The program alternates which implementation runs
-first between samples. Times in the table are the benchmark's median
-per-transform times, to limit the impact of occasional GPU scheduling outliers.
+以下结果是在 2026-11-04 于本仓库构建并运行 `fft_benchmark` 得到的。程序先
+预热 100 次，再采集 100 组计时样本，每组执行 5000 次变换。计时使用 CUDA
+event 测量设备执行时间；不包括主机与 GPU 之间的数据传输、自定义 FFT plan
+创建和 cuFFT plan 创建。程序会在各样本之间轮换不同实现的运行顺序。表格中的
+时间为每次变换的中位数，以减少偶发 GPU 调度异常值的影响。
 
-The local FFT uses a reusable `FFTPlan` and one thread block. The plan stores
-the transform size, default thread count, CUDA device, and a precomputed
-device-side twiddle table. Each block copies the table into shared memory once
-before executing the FFT. The default thread count is 256 for 256 points, 512
-for 512 points, and 1024 for 1024 points and above. cuFFT uses a single
-`CUFFT_C2C` plan. Forward and inverse results are reported separately; inverse
-transforms are unnormalized.
+自定义 FFT 使用可复用的 `FFTPlan`，每次变换启动一个线程块。Plan 保存 FFT
+点数、默认线程数、CUDA 设备和预计算的设备端旋转因子表。每个 block 在执行
+FFT 前将旋转因子表复制到共享内存。默认线程数为：256 点使用 256 个线程，
+512 点使用 512 个线程，1024 点及以上使用 1024 个线程。cuFFT 使用单个
+`CUFFT_C2C` plan。正向和逆向变换分别报告；逆向变换不做归一化。
 
-## Results
+## 单次变换结果
 
-All times are in microseconds per transform. The last column is
-`cuFFT median / planned FFT median`; values below 1 mean cuFFT was faster.
+所有时间单位均为微秒/次变换。最后一列为“cuFFT 中位数 / 自定义 FFT 中位数”；
+小于 1 表示本次测试中 cuFFT 更快。
 
-| Points | Direction | Planned FFT | cuFFT | cuFFT / plan |
+| 点数 | 方向 | 自定义 FFT | cuFFT | cuFFT / 自定义 |
 |---:|---|---:|---:|---:|
-| 256 | Forward | 3.074 | 3.064 | 1.00x |
-| 256 | Inverse | 3.061 | 3.063 | 1.00x |
-| 512 | Forward | 3.388 | 2.278 | 0.67x |
-| 512 | Inverse | 3.344 | 2.278 | 0.68x |
-| 1024 | Forward | 5.945 | 2.702 | 0.45x |
-| 1024 | Inverse | 5.946 | 2.703 | 0.45x |
-| 2048 | Forward | 9.785 | 3.555 | 0.36x |
-| 2048 | Inverse | 9.820 | 3.555 | 0.36x |
-| 4096 | Forward | 17.299 | 4.194 | 0.24x |
-| 4096 | Inverse | 17.353 | 4.194 | 0.24x |
+| 256 | 正向 | 3.074 | 3.064 | 1.00x |
+| 256 | 逆向 | 3.061 | 3.063 | 1.00x |
+| 512 | 正向 | 3.388 | 2.278 | 0.67x |
+| 512 | 逆向 | 3.344 | 2.278 | 0.68x |
+| 1024 | 正向 | 5.945 | 2.702 | 0.45x |
+| 1024 | 逆向 | 5.946 | 2.703 | 0.45x |
+| 2048 | 正向 | 9.785 | 3.555 | 0.36x |
+| 2048 | 逆向 | 9.820 | 3.555 | 0.36x |
+| 4096 | 正向 | 17.299 | 4.194 | 0.24x |
+| 4096 | 逆向 | 17.353 | 4.194 | 0.24x |
 
-The benchmark's correctness checks passed for all tested sizes and both
-directions, including impulse, shifted impulse, constant, single-tone, random,
-and forward/inverse round-trip cases.
+所有测试点数和两个变换方向的正确性检查均通过，包括冲激、移位冲激、常数、
+单频正弦、随机输入，以及正向后接逆向的往返测试。
 
-## Batched throughput
+## 批量吞吐量
 
-The batch API launches one block per independent transform. The benchmark
-compares a contiguous batch of 1024 transforms against 1024 sequential
-`cufftExecC2C` calls using a single-transform cuFFT 1D plan and against one
-`cufftPlanMany` execution. Plan creation and host-device transfers are excluded.
-Correctness is checked for every element in the batch in both directions:
-custom FFT results are compared with `cufftPlanMany`, and `cufftPlanMany` is
-also compared with the sequential single-plan results. The table shows forward
-medians from 30 samples. Each custom sample averages 100 batch launches; each
-PlanMany sample averages 100 executions; each sequential cuFFT sample executes
-the single-transform plan once for each of the 1024 inputs. Per-transform time
-is batch time divided by 1024.
+批量 API 为每个独立变换启动一个 block。基准将连续存储的 1024 个变换分别与
+以下两种 cuFFT 执行方式比较：
 
-| Points | Custom batch (us/batch) | Custom batch (us/FFT) | Sequential cuFFT plan (us/batch) | Sequential cuFFT plan (us/FFT) | cuFFT PlanMany (us/batch) | cuFFT PlanMany (us/FFT) | PlanMany/custom time |
+1. 使用一个单变换 cuFFT 1D plan，对 1024 组输入依次调用
+   `cufftExecC2C`。
+2. 使用 `cufftPlanMany` 创建批量 plan，一次处理整个批次。
+
+计时不包括 plan 创建和主机与 GPU 之间的数据传输。两个方向都会检查批次中
+每个元素的正确性：自定义 FFT 与 `cufftPlanMany` 对比，`cufftPlanMany` 也与
+单变换 plan 顺序执行的结果对比。下表为正向变换的 30 组样本中位数。每组
+自定义 FFT 样本平均计时 100 次批量启动；每组 `PlanMany` 样本平均计时 100 次
+批量执行；每组顺序 cuFFT 样本则对 1024 个输入各执行一次单变换 plan。每次
+变换的耗时等于整批耗时除以 1024。
+
+| 点数 | 自定义批量（μs/批） | 自定义批量（μs/FFT） | 顺序 cuFFT plan（μs/批） | 顺序 cuFFT plan（μs/FFT） | cuFFT PlanMany（μs/批） | cuFFT PlanMany（μs/FFT） | PlanMany / 自定义耗时 |
 |---:|---:|---:|---:|---:|---:|---:|---:|
 | 256 | 6.298 | 0.0062 | 3881.984 | 3.7910 | 3.891 | 0.0038 | 0.62x |
 | 512 | 20.977 | 0.0205 | 2357.248 | 2.3020 | 5.356 | 0.0052 | 0.26x |
@@ -71,38 +68,30 @@ is batch time divided by 1024.
 | 2048 | 103.081 | 0.1007 | 3647.488 | 3.5620 | 14.858 | 0.0145 | 0.14x |
 | 4096 | 204.042 | 0.1993 | 4333.568 | 4.2320 | 25.748 | 0.0251 | 0.13x |
 
-This is a comparison of execution strategies for a batch, not just FFT kernel
-arithmetic: the custom implementation launches one grid for the full batch,
-whereas the cuFFT plan is called once per transform. CUDA-event timings include
-the GPU timeline gaps caused by sequential submissions, so the custom speedup
-primarily reflects avoiding thousands of individual launches. It must not be
-interpreted as the custom FFT kernel being hundreds of times faster than cuFFT.
-For a comparison of batched kernel throughput with launch overhead amortized on
-both sides, the `cufftPlanMany` column is the relevant comparison. cuFFT
-PlanMany is faster than the custom batch for every size in this run, by about
-1.6x to 7.7x per transform. Inverse measurements were within 1% of the forward
-timings. The sequential cuFFT result for 256 points was unusually high in this
-run; it is sensitive to host submission and GPU scheduling overhead and should
-not be used to infer kernel performance.
+该对比反映的是批量执行策略，而不只是 FFT kernel 的算术性能：自定义实现一次
+启动一个 grid 处理整批数据，而顺序 cuFFT 方案每个变换都调用一次 cuFFT plan。
+CUDA event 计时会包含这些顺序提交之间的 GPU 时间间隔，因此自定义方案的优势
+主要来自避免大量单独启动开销。不能据此认为自定义 FFT kernel 的算术性能比
+cuFFT 快数百倍。若要比较双方都已摊销启动开销时的批量吞吐量，应参考
+`cufftPlanMany` 列。本次测试中，所有尺寸的 cuFFT PlanMany 都快于自定义批量
+实现，每个变换约快 1.6 到 7.7 倍。逆向变换的测量结果与正向相差不超过 1%。
+本次 256 点顺序 cuFFT 结果异常偏高；该数据易受主机提交和 GPU 调度开销影响，
+不应用于推断 kernel 本身的性能。
 
-## Notes
+## 说明
 
-- At 256 points, the local kernel and cuFFT have similar measured latency.
-- For the larger tested sizes, cuFFT is faster in this run; the gap grows with
-  transform size.
-- Plan setup is excluded. The plan path stages its precomputed table from global
-  memory to shared memory once per FFT block, then uses shared-memory lookups
-  during butterfly stages. This version removes runtime trigonometric
-  computation, but the table and FFT data compete for shared-memory capacity;
-  cuFFT remains substantially faster for larger sizes. Against the previous
-  global-table lookup version, shared staging improved the measured 4096-point
-  median by roughly 3%; it did not close the gap to cuFFT.
-- These are measurements of repeated, single-transform kernel execution on one
-  GPU, not end-to-end application throughput. Results can vary with GPU clocks,
-  system load, CUDA/cuFFT versions, and workload shape. Re-run the benchmark on
-  the target system before using these figures for performance decisions.
+- 本次测试中，256 点自定义 kernel 与 cuFFT 的单次延迟接近。
+- 对较大的测试点数，cuFFT 更快，且点数越大差距越明显。
+- 测试不包括 plan 创建开销。自定义 plan 会将预计算的旋转因子表从全局内存
+  加载到共享内存，之后在蝶形阶段中通过共享内存查表。此版本避免了运行时三角
+  函数计算，但旋转因子表与 FFT 数据会竞争共享内存容量；较大点数下仍明显
+  慢于 cuFFT。与之前直接查询全局表的版本相比，共享内存暂存使 4096 点中位数
+  约提升 3%，但仍未缩小与 cuFFT 的性能差距。
+- 这些数据是在单个 GPU 上重复执行 FFT kernel 的测量结果，不代表端到端应用
+  吞吐量。GPU 时钟、系统负载、CUDA/cuFFT 版本和工作负载形态都会影响结果。
+  做性能决策前，应在目标系统上重新运行基准。
 
-To reproduce:
+## 复现方法
 
 ```sh
 cmake -S . -B build
