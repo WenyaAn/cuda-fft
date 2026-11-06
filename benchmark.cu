@@ -64,7 +64,7 @@ void check_cufft(cufftResult status, const char* operation) {
  * @param fft_size 输入数组长度。
  * @return 含有 fft_size 个复数值的主机端输入数组。
  */
-std::vector<float2> make_input(const std::string& test_name, int fft_size) {
+std::vector<float2> make_input_fp32(const std::string& test_name, int fft_size) {
     std::vector<float2> input(fft_size, make_float2(0.0f, 0.0f));
     if (test_name == "impulse") {
         input[0] = make_float2(1.0f, 0.0f);
@@ -95,7 +95,7 @@ std::vector<float2> make_input(const std::string& test_name, int fft_size) {
  * @param test_name 测试名称，用于错误报告。
  * @return 所有元素中的最大复数绝对误差；超出容限时终止程序。
  */
-float compare_outputs(const std::vector<float2>& actual,
+float compare_outputs_fp32(const std::vector<float2>& actual,
                       const std::vector<float2>& expected,
                       const std::string& test_name) {
     float max_error = 0.0f;
@@ -491,8 +491,8 @@ void run_fp64_correctness_tests() {
  * @param inverse 是否执行不进行 1/N 归一化的逆向变换。
  * @return CUDA 状态码。
  */
-cudaError_t benchmark_custom_fft_impl(
-    const FFTPlan* plan, const float2* input, float2* output, int thread_count,
+cudaError_t benchmark_custom_fft_fp32_impl(
+    const FFTPlanFp32* plan, const float2* input, float2* output, int thread_count,
     bool use_default_config, int iterations, cudaEvent_t start,
     cudaEvent_t stop, float* average_us, bool inverse) {
     if (plan == nullptr || input == nullptr || output == nullptr ||
@@ -506,8 +506,8 @@ cudaError_t benchmark_custom_fft_impl(
     }
     for (int i = 0; i < iterations; ++i) {
         status = use_default_config
-                     ? launch_fft_plan(plan, input, output, inverse)
-                     : launch_fft_plan_config(plan, input, output,
+                     ? launch_fft_plan_fp32(plan, input, output, inverse)
+                     : launch_fft_plan_config_fp32(plan, input, output,
                                               thread_count, inverse);
         if (status != cudaSuccess) {
             return status;
@@ -546,11 +546,11 @@ cudaError_t benchmark_custom_fft_impl(
  * @param inverse 是否执行逆向变换。
  * @return CUDA 状态码。
  */
-cudaError_t benchmark_custom_fft_config(
-    const FFTPlan* plan, const float2* input, float2* output, int thread_count,
+cudaError_t benchmark_custom_fft_config_fp32(
+    const FFTPlanFp32* plan, const float2* input, float2* output, int thread_count,
     int iterations, cudaEvent_t start, cudaEvent_t stop, float* average_us,
     bool inverse = false) {
-    return benchmark_custom_fft_impl(plan, input, output, thread_count, false,
+    return benchmark_custom_fft_fp32_impl(plan, input, output, thread_count, false,
                                      iterations, start, stop, average_us,
                                      inverse);
 }
@@ -567,11 +567,11 @@ cudaError_t benchmark_custom_fft_config(
  * @param inverse 是否执行逆向变换。
  * @return CUDA 状态码。
  */
-cudaError_t benchmark_custom_fft(
-    const FFTPlan* plan, const float2* input, float2* output, int iterations,
+cudaError_t benchmark_custom_fft_fp32(
+    const FFTPlanFp32* plan, const float2* input, float2* output, int iterations,
     cudaEvent_t start, cudaEvent_t stop, float* average_us,
     bool inverse = false) {
-    return benchmark_custom_fft_impl(plan, input, output, 0, true, iterations,
+    return benchmark_custom_fft_fp32_impl(plan, input, output, 0, true, iterations,
                                      start, stop, average_us, inverse);
 }
 
@@ -585,7 +585,7 @@ cudaError_t benchmark_custom_fft(
  * @param direction CUFFT_FORWARD 或 CUFFT_INVERSE。
  * @return 单次变换的平均耗时，单位为微秒；CUDA/cuFFT 失败时终止程序。
  */
-float benchmark_cufft(cufftHandle plan,
+float benchmark_cufft_fp32(cufftHandle plan,
                       cufftComplex* device_input,
                       cufftComplex* device_output,
                       cudaEvent_t start,
@@ -616,13 +616,13 @@ float benchmark_cufft(cufftHandle plan,
  * @param inverse 是否执行不归一化的逆向变换。
  * @return 每批变换的平均耗时，单位为微秒；CUDA 调用失败时终止程序。
  */
-float benchmark_fft_batch(const FFTPlan* plan, const float2* device_input,
+float benchmark_fft_batch_fp32(const FFTPlanFp32* plan, const float2* device_input,
                           float2* device_output, int batch_count,
                           cudaEvent_t start, cudaEvent_t stop, int iterations,
                           bool inverse) {
     check_cuda(cudaEventRecord(start), "cudaEventRecord(batch start)");
     for (int i = 0; i < iterations; ++i) {
-        check_cuda(launch_fft_plan_batch(plan, device_input, device_output,
+        check_cuda(launch_fft_plan_batch_fp32(plan, device_input, device_output,
                                          batch_count, inverse),
                    "batched custom FFT launch");
     }
@@ -647,7 +647,7 @@ float benchmark_fft_batch(const FFTPlan* plan, const float2* device_input,
  * @param direction CUFFT_FORWARD 或 CUFFT_INVERSE。
  * @return 处理整批变换的耗时，单位为微秒；CUDA/cuFFT 调用失败时终止程序。
  */
-float benchmark_cufft_plan_batch(cufftHandle plan, cufftComplex* device_input,
+float benchmark_cufft_plan_batch_fp32(cufftHandle plan, cufftComplex* device_input,
                                  cufftComplex* device_output, int fft_size,
                                  int batch_count, cudaEvent_t start,
                                  cudaEvent_t stop, int direction) {
@@ -678,7 +678,7 @@ float benchmark_cufft_plan_batch(cufftHandle plan, cufftComplex* device_input,
  * @param direction CUFFT_FORWARD 或 CUFFT_INVERSE。
  * @return 每批变换的平均耗时，单位为微秒；CUDA/cuFFT 调用失败时终止程序。
  */
-float benchmark_cufft_many(cufftHandle plan, cufftComplex* device_input,
+float benchmark_cufft_many_fp32(cufftHandle plan, cufftComplex* device_input,
                            cufftComplex* device_output, cudaEvent_t start,
                            cudaEvent_t stop, int iterations, int direction) {
     check_cuda(cudaEventRecord(start), "cudaEventRecord(cuFFT many start)");
@@ -778,8 +778,9 @@ int main() {
     for (int fft_size : fft_sizes) {
         std::printf("\n=== %d-point C2C FFT ===\n", fft_size);
         // 为当前点数创建自定义 FFT plan、cuFFT plan 及单次变换缓冲区。
-        FFTPlan* custom_plan = nullptr;
-        check_cuda(create_fft_plan(&custom_plan, fft_size), "create_fft_plan");
+        FFTPlanFp32* custom_plan = nullptr;
+        check_cuda(create_fft_plan_fp32(&custom_plan, fft_size),
+                   "create_fft_plan_fp32");
         float2* device_input = nullptr;
         float2* custom_output = nullptr;
         cufftComplex* cufft_output = nullptr;
@@ -798,12 +799,12 @@ int main() {
         // 用多种典型输入分别验证正向与逆向结果和 cuFFT 一致。
         for (const std::string& test_name : test_names) {
             const std::vector<float2> host_input =
-                make_input(test_name, fft_size);
+                make_input_fp32(test_name, fft_size);
             check_cuda(cudaMemcpy(device_input, host_input.data(), bytes,
                                   cudaMemcpyHostToDevice),
                        "cudaMemcpy(input)");
             for (bool inverse : {false, true}) {
-                check_cuda(launch_fft_plan(custom_plan, device_input,
+                check_cuda(launch_fft_plan_fp32(custom_plan, device_input,
                                            custom_output, inverse),
                            "custom FFT launch");
                 check_cuda(cudaGetLastError(), "custom FFT launch");
@@ -820,7 +821,7 @@ int main() {
                 check_cuda(cudaMemcpy(host_cufft.data(), cufft_output, bytes,
                                       cudaMemcpyDeviceToHost),
                            "cudaMemcpy(cuFFT output)");
-                compare_outputs(
+                compare_outputs_fp32(
                     host_custom, host_cufft,
                     std::to_string(fft_size) + " " +
                         (inverse ? "inverse " : "forward ") + test_name);
@@ -829,14 +830,14 @@ int main() {
 
         // 验证正向后接逆向变换得到 N 倍原输入（逆变换不归一化）。
         const std::vector<float2> round_trip_input =
-            make_input("random", fft_size);
+            make_input_fp32("random", fft_size);
         check_cuda(cudaMemcpy(device_input, round_trip_input.data(), bytes,
                               cudaMemcpyHostToDevice),
                    "cudaMemcpy(round-trip input)");
-        check_cuda(launch_fft_plan(custom_plan, device_input, custom_output),
+        check_cuda(launch_fft_plan_fp32(custom_plan, device_input, custom_output),
                    "custom forward round-trip launch");
         check_cuda(cudaGetLastError(), "custom forward round-trip launch");
-        check_cuda(launch_fft_plan(custom_plan, custom_output, device_input,
+        check_cuda(launch_fft_plan_fp32(custom_plan, custom_output, device_input,
                                    true),
                    "custom inverse round-trip launch");
         check_cuda(cudaGetLastError(), "custom inverse round-trip launch");
@@ -850,7 +851,7 @@ int main() {
                 make_float2(round_trip_input[i].x * fft_size,
                             round_trip_input[i].y * fft_size);
         }
-        compare_outputs(host_custom, expected_round_trip,
+        compare_outputs_fp32(host_custom, expected_round_trip,
                         std::to_string(fft_size) + " round trip (N*x)");
 
         std::vector<int> thread_counts = {256};
@@ -878,7 +879,7 @@ int main() {
                 check_cuda(cudaMemcpy(host_cufft.data(), cufft_output, bytes,
                                       cudaMemcpyDeviceToHost),
                            "cudaMemcpy(config reference)");
-                check_cuda(launch_fft_plan_config(
+                check_cuda(launch_fft_plan_config_fp32(
                                custom_plan, device_input, custom_output,
                                thread_count, inverse),
                            "FFT config correctness launch");
@@ -888,14 +889,14 @@ int main() {
                 check_cuda(cudaMemcpy(host_custom.data(), custom_output, bytes,
                                       cudaMemcpyDeviceToHost),
                            "cudaMemcpy(config output)");
-                compare_outputs(
+                compare_outputs_fp32(
                     host_custom, host_cufft,
                     std::to_string(fft_size) + " " +
                         (inverse ? "inverse " : "forward ") +
                         std::to_string(thread_count) + " threads");
             }
             for (int i = 0; i < kWarmupIterations; ++i) {
-                check_cuda(launch_fft_plan_config(
+                check_cuda(launch_fft_plan_config_fp32(
                                custom_plan, device_input, custom_output,
                                thread_count),
                            "FFT config warmup launch");
@@ -908,7 +909,7 @@ int main() {
         for (int sample = 0; sample < kConfigBenchmarkSamples; ++sample) {
             for (size_t config = 0; config < thread_counts.size(); ++config) {
                 float custom_us = 0.0f;
-                check_cuda(benchmark_custom_fft_config(
+                check_cuda(benchmark_custom_fft_config_fp32(
                                custom_plan, device_input, custom_output,
                                thread_counts[config],
                                kConfigBenchmarkIterations, start, stop,
@@ -938,11 +939,11 @@ int main() {
 
         // 预热单次 FFT 路径，降低首次启动和频率变化对正式计时的影响。
         for (int i = 0; i < kWarmupIterations; ++i) {
-            check_cuda(launch_fft_plan(custom_plan, device_input,
+            check_cuda(launch_fft_plan_fp32(custom_plan, device_input,
                                        custom_output),
                        "custom FFT warmup launch");
             check_cuda(cudaGetLastError(), "custom FFT warmup launch");
-            check_cuda(launch_fft_plan(custom_plan, device_input, custom_output,
+            check_cuda(launch_fft_plan_fp32(custom_plan, device_input, custom_output,
                                        true),
                        "custom inverse FFT warmup launch");
             check_cuda(cudaGetLastError(),
@@ -969,21 +970,21 @@ int main() {
             for (int sample = 0; sample < kBenchmarkSamples; ++sample) {
                 if (sample % 2 == 0) {
                     float custom_us = 0.0f;
-                    check_cuda(benchmark_custom_fft(
+                    check_cuda(benchmark_custom_fft_fp32(
                                    custom_plan, device_input, custom_output,
                                    kBenchmarkIterations, start, stop,
                                    &custom_us, inverse),
                                "planned FFT benchmark");
                     custom_samples.push_back(custom_us);
-                    cufft_samples.push_back(benchmark_cufft(
+                    cufft_samples.push_back(benchmark_cufft_fp32(
                         plan, reinterpret_cast<cufftComplex*>(device_input),
                         cufft_output, start, stop, direction));
                 } else {
-                    cufft_samples.push_back(benchmark_cufft(
+                    cufft_samples.push_back(benchmark_cufft_fp32(
                         plan, reinterpret_cast<cufftComplex*>(device_input),
                         cufft_output, start, stop, direction));
                     float custom_us = 0.0f;
-                    check_cuda(benchmark_custom_fft(
+                    check_cuda(benchmark_custom_fft_fp32(
                                    custom_plan, device_input, custom_output,
                                    kBenchmarkIterations, start, stop,
                                    &custom_us, inverse),
@@ -1010,7 +1011,7 @@ int main() {
         const size_t batch_bytes = batch_elements * sizeof(float2);
         // 分配连续批量输入/输出，并创建覆盖整个批次的 cuFFT PlanMany。
         std::vector<float2> host_batch_input =
-            make_input("random", static_cast<int>(batch_elements));
+            make_input_fp32("random", static_cast<int>(batch_elements));
         std::vector<float2> host_batch_custom(batch_elements);
         std::vector<float2> host_batch_single(batch_elements);
         std::vector<float2> host_batch_cufft(batch_elements);
@@ -1061,11 +1062,11 @@ int main() {
             check_cuda(cudaMemcpy(host_batch_cufft.data(), device_batch_cufft,
                                   batch_bytes, cudaMemcpyDeviceToHost),
                        "cudaMemcpy(cuFFT PlanMany output)");
-            compare_outputs(host_batch_cufft, host_batch_single,
+            compare_outputs_fp32(host_batch_cufft, host_batch_single,
                             std::to_string(fft_size) + " PlanMany vs single "
                                 "cuFFT " +
                                 (inverse ? "inverse" : "forward"));
-            check_cuda(launch_fft_plan_batch(
+            check_cuda(launch_fft_plan_batch_fp32(
                            custom_plan, device_batch_input, device_batch_custom,
                            kBatchCount, inverse),
                        "custom FFT batch correctness launch");
@@ -1075,12 +1076,12 @@ int main() {
             check_cuda(cudaMemcpy(host_batch_custom.data(), device_batch_custom,
                                   batch_bytes, cudaMemcpyDeviceToHost),
                        "cudaMemcpy(custom batch output)");
-            compare_outputs(host_batch_custom, host_batch_cufft,
+            compare_outputs_fp32(host_batch_custom, host_batch_cufft,
                             std::to_string(fft_size) + " batch " +
                                 (inverse ? "inverse" : "forward"));
 
             for (int i = 0; i < kWarmupIterations; ++i) {
-                check_cuda(launch_fft_plan_batch(
+                check_cuda(launch_fft_plan_batch_fp32(
                                custom_plan, device_batch_input,
                                device_batch_custom, kBatchCount, inverse),
                            "custom FFT batch warmup");
@@ -1114,46 +1115,46 @@ int main() {
             for (int sample = 0; sample < kBatchBenchmarkSamples; ++sample) {
                 const int order = sample % 3;
                 if (order == 0) {
-                    custom_batch_samples.push_back(benchmark_fft_batch(
+                    custom_batch_samples.push_back(benchmark_fft_batch_fp32(
                         custom_plan, device_batch_input, device_batch_custom,
                         kBatchCount, start, stop, kBatchBenchmarkIterations,
                         inverse));
-                    cufft_batch_samples.push_back(benchmark_cufft_plan_batch(
+                    cufft_batch_samples.push_back(benchmark_cufft_plan_batch_fp32(
                         plan, reinterpret_cast<cufftComplex*>(
                                   device_batch_input),
                         device_batch_cufft, fft_size, kBatchCount, start, stop,
                         direction));
-                    cufft_many_samples.push_back(benchmark_cufft_many(
+                    cufft_many_samples.push_back(benchmark_cufft_many_fp32(
                         many_plan,
                         reinterpret_cast<cufftComplex*>(device_batch_input),
                         device_batch_cufft, start, stop,
                         kBatchBenchmarkIterations, direction));
                 } else if (order == 1) {
-                    cufft_batch_samples.push_back(benchmark_cufft_plan_batch(
+                    cufft_batch_samples.push_back(benchmark_cufft_plan_batch_fp32(
                         plan, reinterpret_cast<cufftComplex*>(
                                   device_batch_input),
                         device_batch_cufft, fft_size, kBatchCount, start, stop,
                         direction));
-                    cufft_many_samples.push_back(benchmark_cufft_many(
+                    cufft_many_samples.push_back(benchmark_cufft_many_fp32(
                         many_plan,
                         reinterpret_cast<cufftComplex*>(device_batch_input),
                         device_batch_cufft, start, stop,
                         kBatchBenchmarkIterations, direction));
-                    custom_batch_samples.push_back(benchmark_fft_batch(
+                    custom_batch_samples.push_back(benchmark_fft_batch_fp32(
                         custom_plan, device_batch_input, device_batch_custom,
                         kBatchCount, start, stop, kBatchBenchmarkIterations,
                         inverse));
                 } else {
-                    cufft_many_samples.push_back(benchmark_cufft_many(
+                    cufft_many_samples.push_back(benchmark_cufft_many_fp32(
                         many_plan,
                         reinterpret_cast<cufftComplex*>(device_batch_input),
                         device_batch_cufft, start, stop,
                         kBatchBenchmarkIterations, direction));
-                    custom_batch_samples.push_back(benchmark_fft_batch(
+                    custom_batch_samples.push_back(benchmark_fft_batch_fp32(
                         custom_plan, device_batch_input, device_batch_custom,
                         kBatchCount, start, stop, kBatchBenchmarkIterations,
                         inverse));
-                    cufft_batch_samples.push_back(benchmark_cufft_plan_batch(
+                    cufft_batch_samples.push_back(benchmark_cufft_plan_batch_fp32(
                         plan, reinterpret_cast<cufftComplex*>(
                                   device_batch_input),
                         device_batch_cufft, fft_size, kBatchCount, start, stop,
@@ -1202,7 +1203,8 @@ int main() {
         check_cuda(cudaFree(device_batch_cufft),
                    "cudaFree(batch cuFFT output)");
         check_cufft(cufftDestroy(plan), "cufftDestroy");
-        check_cuda(destroy_fft_plan(&custom_plan), "destroy_fft_plan");
+        check_cuda(destroy_fft_plan_fp32(&custom_plan),
+                   "destroy_fft_plan_fp32");
         check_cuda(cudaFree(device_input), "cudaFree(input)");
         check_cuda(cudaFree(custom_output), "cudaFree(custom output)");
         check_cuda(cudaFree(cufft_output), "cudaFree(cuFFT output)");

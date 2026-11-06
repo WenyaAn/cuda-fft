@@ -5,7 +5,7 @@
 使用 256 个线程，512 点使用 512 个线程，更大尺寸使用 1024 个线程。跨 warp
 的蝶形阶段使用共享内存，最后几个阶段通过 warp shuffle 和寄存器完成。
 
-可复用的 `FFTPlan` 保存 FFT 点数、默认线程配置和 CUDA 设备信息。创建 plan
+可复用的 `FFTPlanFp32` 保存 FFT 点数、默认线程配置和 CUDA 设备信息。创建 plan
 时会在 GPU 上分配并上传预计算的旋转因子表。每个 FFT block 会先将旋转因子表
 载入共享内存，并在各蝶形阶段中重复使用。请在创建 plan 时对应的 CUDA 设备
 上执行和销毁该 plan。FFT 执行使用基于 plan 的 API。
@@ -67,14 +67,14 @@ RTX 4090 测试运行，可能随 GPU 和 CUDA/cuFFT 版本变化。
 ## 代码结构
 
 - `CMakeLists.txt`：配置 CUDA/C++ 构建目标、链接 CUDA Runtime 和 cuFFT，并注册 CTest。
-- `fft.cuh`：声明 `FFTPlan` 的创建、销毁、单次执行和批量执行接口。
+- `fft.cuh`：声明 `FFTPlanFp32` 的创建、销毁、单次执行和批量执行接口。
 - `fft.cu`：实现 FFT plan 管理、旋转因子准备，以及不同尺寸的 CUDA FFT kernel。
 - `benchmark.cu`：程序入口；运行正确性检查、线程配置测试和性能基准，并使用 cuFFT
   作为参考实现。
 - `PERFORMANCE.md`：记录基准测试环境、方法和测量结果。
 - `OPTIMIZATION.md`：记录当前实现特点及后续优化方向。
 
-整体调用流程是：`benchmark.cu` 创建并复用 `FFTPlan`，通过 `fft.cuh` 中的 API
+整体调用流程是：`benchmark.cu` 创建并复用 `FFTPlanFp32`，通过 `fft.cuh` 中的 API
 调用 `fft.cu` 的 kernel；正确性检查和性能对比由基准程序负责。
 
 ## 可复用 FFT plan
@@ -85,22 +85,24 @@ CUDA 设备关联；调用和销毁 plan 时应选择同一设备。创建 plan 
 逆向变换通过取复共轭获得对应的旋转因子。计算前，每个 block 都会将旋转因子
 表复制到共享内存；kernel 不需要额外的设备工作区。
 
-原先不使用 plan 的 FFT 启动和基准函数已移除。创建 plan 后，可调用
-`launch_fft_plan` 或 `launch_fft_plan_config`：
+原先不使用 plan 的 FFT 启动和基准函数已移除。单精度接口使用 `FFTPlanFp32` 和
+`float2` 数据，函数名统一带有 `_fp32` 后缀；双精度接口使用 `FFTPlanFp64`、
+`double2` 和 `_fp64` 后缀。创建单精度 plan 后，可调用
+`launch_fft_plan_fp32` 或 `launch_fft_plan_config_fp32`：
 
 ```cpp
-FFTPlan* plan = nullptr;
-cudaError_t status = create_fft_plan(&plan, 2048);
+FFTPlanFp32* plan = nullptr;
+cudaError_t status = create_fft_plan_fp32(&plan, 2048);
 if (status != cudaSuccess) {
     // 处理 CUDA 错误。
 }
 
-status = launch_fft_plan(plan, device_input, device_output);
+status = launch_fft_plan_fp32(plan, device_input, device_output);
 if (status != cudaSuccess) {
     // 处理 CUDA 错误。
 }
 
-status = destroy_fft_plan(&plan);
+status = destroy_fft_plan_fp32(&plan);
 if (status != cudaSuccess) {
     // 处理 CUDA 错误。
 }
@@ -127,7 +129,8 @@ if (status == cudaSuccess) {
 `fft_size` 个复数值，kernel 为每个变换启动一个 block：
 
 ```cpp
-status = launch_fft_plan_batch(plan, batch_input, batch_output, batch_count);
+status = launch_fft_plan_batch_fp32(plan, batch_input, batch_output,
+                                    batch_count);
 if (status != cudaSuccess) {
     // 处理 CUDA 错误。
 }

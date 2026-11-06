@@ -39,7 +39,7 @@
 
 ### 1. [部分完成] 旋转因子表与共享内存占用
 
-`FFTPlan` 在 GPU 上保存预计算的 twiddle factors；每个 block 将表加载到共享
+`FFTPlanFp32` 在 GPU 上保存预计算的 twiddle factors；每个 block 将表加载到共享
 内存，避免蝶形阶段反复访问全局内存和运行时三角函数计算。旋转因子表与 FFT
 中间数据会共同占用共享内存，4096 点配置达到每个 block 约 48 KiB，因此
 进一步调整必须兼顾共享内存带宽、占用率和正确性。当前测量显示，虽然已经移除
@@ -52,7 +52,7 @@ plan 缓存和旋转因子共享内存暂存已经实现；降低共享内存占
 
 ### 2. [基础路径已实现，后续调优未完成] 批量 FFT
 
-`launch_fft_plan_batch` 让不同 block 并行处理连续存储的独立输入，每个 block
+`launch_fft_plan_batch_fp32` 让不同 block 并行处理连续存储的独立输入，每个 block
 执行一个 FFT。基准使用 1024 个变换，分别与单个 cuFFT 1D plan 的 1024 次
 顺序执行和 `cufftPlanMany` 批量执行比较。自定义路径比逐次调用 cuFFT plan
 快，但该结果包含逐次调用的发射开销，不代表 FFT 算术内核本身的速度对比。
